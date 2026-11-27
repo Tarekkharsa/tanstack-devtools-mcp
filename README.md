@@ -56,7 +56,7 @@ diagnose
 ## Try it
 
 ```sh
-git clone https://github.com/Tarekkharsa/tanstack-devtools-mcp loopsight
+git clone https://github.com/Tarekkharsa/loopsight
 cd loopsight
 pnpm install
 pnpm example
