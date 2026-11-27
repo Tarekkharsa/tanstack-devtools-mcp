@@ -265,7 +265,7 @@ To have that route as the only endpoint, turn this package's own off:
 tanstackDevtoolsMcp({ standalone: false })
 ```
 
-The page then connects through the dev server it was served from, and no second port opens. It needs the dev server to own its HTTP server, so not Vite's middleware mode.
+The page then connects through the dev server it was served from, and no second port opens. In Vite's middleware mode the dev server has no HTTP server of its own, so pass your app's server as `server.hmr.server`, which is where Vite puts its own WebSocket too.
 
 | | This package's endpoint | Vite DevTools' route |
 | --- | --- | --- |
@@ -302,7 +302,7 @@ There is no token. Any process on your machine can connect, as it can to the Vit
 
 ## Status and limits
 
-Verified: React 19, TanStack Query 5, TanStack Router 1.170, Vite 8 and Chrome, on a single-page app and on a production-sized TanStack Start app under Vite+. `pnpm test` runs the unit and HTTP tests and `pnpm e2e` drives the example in headless Chrome through the MCP endpoint, including a hot update, a build error and its fix. The Vite DevTools route is driven the same way with `@vitejs/devtools` 0.8.3, and a Claude Code run was connected to it by hand; on Vite+ with 0.8.0 the tools were only checked to be listed.
+Verified: React 19, TanStack Query 5, TanStack Router 1.170, Vite 8 and Chrome, on a single-page app and on a production-sized TanStack Start app under Vite+. `pnpm test` runs the unit and HTTP tests and `pnpm e2e` drives the example in headless Chrome through the MCP endpoint, including a hot update, a build error and its fix. The Vite DevTools route is driven the same way with `@vitejs/devtools` 0.8.3. By hand: a Claude Code run was connected to that route, and the tools were called through it with `standalone: false` on a server-rendered app under Vite+ with `@vitejs/devtools` 0.8.0.
 
 Not verified: the Vue, Solid, Svelte and Angular adapters, and Vite below 8. The page-side code reads Query and Router by shape, not by import, so they may work.
 

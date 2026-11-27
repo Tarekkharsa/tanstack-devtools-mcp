@@ -314,10 +314,14 @@ export function tanstackDevtoolsMcp(
       } else {
         // No port of our own: the page reaches the hub through the dev
         // server it was served from, and agents through Vite DevTools.
-        const http = server.httpServer
+        // In middleware mode Vite has no HTTP server of its own. The app's
+        // server is known to it only when passed as `server.hmr.server`,
+        // which is also where Vite puts its own WebSocket.
+        const hmr = server.config.server.hmr
+        const http = server.httpServer ?? (typeof hmr === 'object' ? hmr.server : undefined)
         if (!http) {
           logger.warn(
-            '[tanstack-devtools-mcp] `standalone: false` needs the dev server to own an HTTP server. Nothing is connected.',
+            '[tanstack-devtools-mcp] `standalone: false` has no HTTP server to put the page connection on. In middleware mode, pass your server as `server.hmr.server`. Nothing is connected.',
           )
           return
         }
@@ -331,7 +335,7 @@ export function tanstackDevtoolsMcp(
         http.on('upgrade', bridge.handle)
         http.once('close', () => bridge.close())
         bridgeUrl = `(location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + ${JSON.stringify(path)}`
-        http.once('listening', () => {
+        const warnIfUnserved = () => {
           // The DevTools hook has run by now if it was going to.
           setTimeout(() => {
             if (onDevtools) return
@@ -339,7 +343,10 @@ export function tanstackDevtoolsMcp(
               '[tanstack-devtools-mcp] `standalone: false`, but Vite DevTools did not ask for the tools, so no agent can reach them. Enable `devtools` in the Vite config and install @vitejs/devtools and @devframes/agentic, or remove `standalone: false`.',
             )
           }, 3000).unref()
-        })
+        }
+        // An app's own server may be listening already.
+        if (http.listening) warnIfUnserved()
+        else http.once('listening', warnIfUnserved)
       }
       recordVite(server, hub)
     },
