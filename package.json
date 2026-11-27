@@ -1,0 +1,74 @@
+{
+  "name": "tanstack-devtools-mcp",
+  "version": "0.0.0",
+  "description": "An MCP server that lets coding agents read and drive TanStack Query and Router in a running app. Unofficial.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "tanstack",
+    "devtools",
+    "mcp",
+    "agents",
+    "react-query",
+    "tanstack-router",
+    "vite-plugin"
+  ],
+  "sideEffects": [
+    "./dist/client/index.js"
+  ],
+  "exports": {
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "default": "./dist/client/index.js"
+    },
+    "./vite": {
+      "types": "./dist/vite.d.ts",
+      "default": "./dist/vite.js"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "default": "./dist/server/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "tanstack-devtools-mcp": "./dist/server/bin.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "e2e": "pnpm build && node e2e/run.mjs",
+    "example": "pnpm build && pnpm --filter example dev"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "ws": "^8.23.0",
+    "zod": "^4.6.7"
+  },
+  "peerDependencies": {
+    "vite": ">=6"
+  },
+  "peerDependenciesMeta": {
+    "vite": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@tanstack/query-core": "^5.108.4",
+    "@tanstack/react-router": "^1.170.46",
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.1",
+    "happy-dom": "^21.0.4",
+    "playwright-core": "^1.65.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.0.0",
+    "vitest": "^5.1.2"
+  }
+}
