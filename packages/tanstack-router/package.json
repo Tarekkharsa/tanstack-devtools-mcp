@@ -1,0 +1,36 @@
+{
+  "name": "@loopsight/tanstack-router",
+  "description": "TanStack Router as a loopsight source: navigation events, readers, actions and rules from the shipped skills.",
+  "version": "0.0.0",
+  "type": "module",
+  "license": "MIT",
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tarekkharsa/tanstack-devtools-mcp.git",
+    "directory": "packages/tanstack-router"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./page": {
+      "types": "./dist/page.d.ts",
+      "default": "./dist/page.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@loopsight/core": "workspace:*",
+    "zod": "^4.6.7"
+  }
+}

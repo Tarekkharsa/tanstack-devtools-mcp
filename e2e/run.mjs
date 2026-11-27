@@ -59,10 +59,19 @@ try {
 
   await step("Vite's client carries the import, for apps with no index.html", async () => {
     const viteClient = await (await fetch(new URL('@vite/client', appUrl))).text()
-    assert.match(viteClient, /@id\/__x00__tanstack-devtools-mcp:entry/)
-    const entry = await fetch(new URL('@id/__x00__tanstack-devtools-mcp:entry', appUrl))
+    assert.match(viteClient, /@id\/__x00__loopsight:entry/)
+    const entry = await fetch(new URL('@id/__x00__loopsight:entry', appUrl))
     assert.equal(entry.status, 200)
-    assert.match(await entry.text(), /connect\(\{ url: "ws:\/\/127\.0\.0\.1:4791\/bridge" \}\)/)
+    const code = await entry.text()
+    assert.match(code, /url: "ws:\/\/127\.0\.0\.1:4791\/bridge",/)
+    // The example has the router and Query, and neither Start nor the
+    // Devtools event bus, so two of the four built-in sources are sent.
+    // They and the core come from the plugin: the app installs nothing.
+    assert.match(code, /sources: \[source0, source1\],/)
+    assert.match(code, /tanstack-router\/dist\/page\.js"[\s\S]*tanstack-query\/dist\/page\.js"/)
+    const core = /from "(\/@id\/__x00__loopsight:[^"]+\/page\/index\.js)"/.exec(code)
+    assert.ok(core, 'the core page module is served by the plugin')
+    assert.equal((await fetch(new URL(core[1], appUrl))).status, 200)
   })
 
   await step('the page connected with no code in the app', async () => {
@@ -252,7 +261,7 @@ try {
     assert.match(result.problems[0].summary, /^build error in src\/Home\.tsx.*PARSE_ERROR.*Unexpected token/)
     assert.match(result.problems[0].detail.message, /Home\.tsx:3:1/)
     const diagnosis = await call('diagnose', { after: before })
-    assert.match(diagnosis.findings[0].title, /Vite reports a build error/)
+    assert.match(diagnosis.findings[0].title, /The dev server reports a build error/)
   })
 
   await step('after the fix: the update goes through and the error is gone', async () => {
@@ -368,13 +377,13 @@ try {
 
   await step("the tools are on Vite DevTools' route, next to its own", async () => {
     const { tools } = await viaDevtools.listTools()
-    const ours = tools.filter((tool) => tool.name.startsWith('tanstack_'))
+    const ours = tools.filter((tool) => tool.name.startsWith('loopsight_'))
     assert.equal(ours.length, 20, ours.map((tool) => tool.name).join(' '))
     assert.ok(tools.length > ours.length, 'Vite DevTools serves tools of its own')
-    const navigate = ours.find((tool) => tool.name === 'tanstack_navigate')
+    const navigate = ours.find((tool) => tool.name === 'loopsight_navigate')
     assert.deepEqual(navigate.inputSchema.required, ['to'])
     assert.equal(navigate.annotations.readOnlyHint, false)
-    assert.equal(ours.find((tool) => tool.name === 'tanstack_overview').annotations.readOnlyHint, true)
+    assert.equal(ours.find((tool) => tool.name === 'loopsight_overview').annotations.readOnlyHint, true)
   })
 
   await step('no second port is open', async () => {
@@ -382,7 +391,7 @@ try {
   })
 
   await step('the page connected through the dev server, with nothing in the app', async () => {
-    const overview = await callHosted('tanstack_overview')
+    const overview = await callHosted('loopsight_overview')
     assert.equal(overview.connected, true)
     assert.match(overview.url, /\/posts$/)
     assert.deepEqual(overview.router.matches, ['__root__', '/posts'])
@@ -390,11 +399,11 @@ try {
   })
 
   await step('reads, an action and the timeline work through the route', async () => {
-    const { lastEntry } = await callHosted('tanstack_count_events')
-    const moved = await callHosted('tanstack_navigate', { to: '/posts/$postId', params: { postId: '2' } })
+    const { lastEntry } = await callHosted('loopsight_count_events')
+    const moved = await callHosted('loopsight_navigate', { to: '/posts/$postId', params: { postId: '2' } })
     assert.equal(moved.location.pathname, '/posts/2')
     await page.getByRole('heading', { name: 'Routes are state' }).waitFor()
-    const waited = await callHosted('tanstack_wait_for_idle', { after: lastEntry })
+    const waited = await callHosted('loopsight_wait_for_idle', { after: lastEntry })
     assert.equal(waited.idle, true)
     const seen = kinds(waited.entries)
     for (const kind of ['router/onBeforeNavigate', 'query/fetch', 'network/ok', 'query/success', 'router/onResolved']) {
@@ -402,7 +411,7 @@ try {
     }
     const request = waited.entries.find((e) => e.source === 'network')
     assert.match(request.from, /^request src\/main\.tsx:\d+:\d+$/)
-    const query = await callHosted('tanstack_get_query', { queryHash: '["post",2]' })
+    const query = await callHosted('loopsight_get_query', { queryHash: '["post",2]' })
     assert.equal(query.data.title, 'Routes are state')
     assert.ok(query.usedAt.length > 0)
   })
@@ -410,17 +419,17 @@ try {
   await step('after an edit, wait_for_update reports the hot update through the route', async () => {
     await page.getByRole('link', { name: 'Home' }).click()
     await page.getByText('Open Posts, then ask your agent').waitFor()
-    await callHosted('tanstack_wait_for_idle')
-    const { lastEntry } = await callHosted('tanstack_count_events')
+    await callHosted('loopsight_wait_for_idle')
+    const { lastEntry } = await callHosted('loopsight_count_events')
     writeFileSync(homeFile, homeSource.replace('Open Posts, then ask', 'Edited through DevTools, then ask'))
-    const result = await callHosted('tanstack_wait_for_update', { after: lastEntry })
+    const result = await callHosted('loopsight_wait_for_update', { after: lastEntry })
     assert.equal(result.update, 'hmr-update', JSON.stringify(result).slice(0, 400))
     assert.deepEqual(result.files, ['src/Home.tsx'])
     await page.getByText('Edited through DevTools, then ask').waitFor()
   })
 
   await step('a tool failure reaches the agent as an error', async () => {
-    const result = await viaDevtools.callTool({ name: 'tanstack_get_query', arguments: { queryHash: 'nope' } })
+    const result = await viaDevtools.callTool({ name: 'loopsight_get_query', arguments: { queryHash: 'nope' } })
     assert.equal(result.isError, true)
     assert.match(result.content[0].text, /No query with hash nope/)
   })

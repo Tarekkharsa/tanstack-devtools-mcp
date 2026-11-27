@@ -1,0 +1,35 @@
+{
+  "name": "@loopsight/tanstack-start",
+  "description": "TanStack Start as a loopsight source: names server functions in the network log and adds rules from the shipped skills.",
+  "version": "0.0.0",
+  "type": "module",
+  "license": "MIT",
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tarekkharsa/tanstack-devtools-mcp.git",
+    "directory": "packages/tanstack-start"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./page": {
+      "types": "./dist/page.d.ts",
+      "default": "./dist/page.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@loopsight/core": "workspace:*"
+  }
+}

@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { appFrames, parseStack } from '../src/client/stack.js'
-import { diagnose } from '../src/server/diagnose.js'
-import { Hub } from '../src/server/hub.js'
-import type { Connection } from '../src/server/hub.js'
-import type { LogEntry, PageMessage } from '../src/protocol.js'
+import { appFrames, parseStack } from '@loopsight/core/page'
+import { Hub, diagnose as run } from '@loopsight/core/server'
+import { PARTS, recorded } from './support.js'
+import type { Connection, LogEntry, PageFacts } from '@loopsight/core/server'
+import type { PageMessage } from '@loopsight/core/protocol'
+
+/** A diagnosis as the Vite plugin runs it: the core's rules plus every source's. */
+const diagnose = (entries: Array<LogEntry>, live: PageFacts | null, dropped = 0) =>
+  run(entries, live, dropped, PARTS)
 
 function page(hub: Hub, id: string) {
   const listeners: Array<(text: string) => void> = []
@@ -101,7 +105,7 @@ describe('Hub', () => {
 describe('stack frames', () => {
   it('reads Chrome and Firefox traces and keeps only the app frames', () => {
     const chrome = `Error
-    at here (http://localhost:5173/@id/__x00__tanstack-devtools-mcp:client/stack.js:30:5)
+    at here (http://localhost:5173/@id/__x00__loopsight:/app/node_modules/@loopsight/core/dist/page/stack.js:30:5)
     at useBaseQuery (http://localhost:5173/node_modules/.vite/deps/@tanstack_react-query.js?v=1:3000:20)
     at usePosts (http://localhost:5173/src/hooks/posts.ts?t=17:8:10)
     at async Posts (http://localhost:5173/src/routes/posts.tsx:21:16)
@@ -124,11 +128,8 @@ describe('stack frames', () => {
 
 describe('diagnose', () => {
   let n = 0
-  const entry = (partial: Partial<LogEntry> & Pick<LogEntry, 'source' | 'type' | 'summary'>): LogEntry => ({
-    n: ++n,
-    t: 1_000_000 + n * 100,
-    ...partial,
-  })
+  const entry = (partial: Partial<LogEntry> & Pick<LogEntry, 'source' | 'type' | 'summary'>): LogEntry =>
+    recorded({ n: ++n, t: 1_000_000 + n * 100, ...partial })
 
   it('finds nothing wrong in a quiet log', () => {
     const result = diagnose(
@@ -169,22 +170,37 @@ describe('diagnose', () => {
       12,
     )
     expect(result.ok).toBe(false)
+    // Errors first, then warnings; within each, the core's rules, then each
+    // source's in the order the sources were given.
     expect(result.findings.map((f) => `${f.severity}: ${f.title}`)).toEqual([
-      'error: Hydration mismatch between the server render and the client',
       'error: Uncaught error',
+      'error: 1 failed requests',
       'error: A matched route is showing an error',
       'error: 1 query is in the error state',
       'error: 1 failed mutation',
-      'error: 1 failed requests',
+      'error: Hydration mismatch between the server render and the client',
       'warning: console.error called with 1 distinct message',
-      'warning: A query fetched 5 times within 10 s',
       'warning: The same request was in flight 3 times at once',
+      'warning: A query fetched 5 times within 10 s',
       'info: Slowest navigations, queries and requests',
       'info: The log dropped its 12 oldest entries',
     ])
-    const uncaught = result.findings[1]!
+    expect(result.findings.map((f) => f.rule)).toEqual([
+      'core/uncaught',
+      'core/failed-requests',
+      'router/match-error',
+      'query/in-error',
+      'query/failed-mutations',
+      'start/hydration-mismatch',
+      'core/console-errors',
+      'core/duplicate-requests',
+      'query/fetch-loop',
+      undefined,
+      undefined,
+    ])
+    const uncaught = result.findings[0]!
     expect(uncaught.evidence[0]).toMatch(/reading 'id'\) — from Cart src\/Cart\.tsx:14:22$/)
-    expect(result.findings[7]!.evidence).toEqual(['["rates"] — from Rates src/rates.tsx:9:3'])
+    expect(result.findings[8]!.evidence).toEqual(['["rates"] — from Rates src/rates.tsx:9:3'])
     expect(result.findings[9]!.evidence).toEqual([
       '2400 ms navigation: / → /slow',
       '2500 ms request: POST /api/cart → 500',

@@ -1,17 +1,56 @@
 {
+  "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "lib": ["ES2023", "DOM", "DOM.Iterable"],
-    "types": ["node"],
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "verbatimModuleSyntax": true,
-    "skipLibCheck": true,
-    "declaration": true,
-    "sourceMap": true,
-    "noEmit": true
+    "paths": {
+      "@loopsight/core/page": [
+        "./packages/core/src/page/index.ts"
+      ],
+      "@loopsight/core/server": [
+        "./packages/core/src/server/index.ts"
+      ],
+      "@loopsight/core/protocol": [
+        "./packages/core/src/protocol.ts"
+      ],
+      "@loopsight/vite": [
+        "./packages/vite/src/index.ts"
+      ],
+      "loopsight/vite": [
+        "./packages/loopsight/src/vite.ts"
+      ],
+      "loopsight/client": [
+        "./packages/loopsight/src/client.ts"
+      ],
+      "loopsight/server": [
+        "./packages/loopsight/src/server.ts"
+      ],
+      "@loopsight/tanstack-query/page": [
+        "./packages/tanstack-query/src/page.ts"
+      ],
+      "@loopsight/tanstack-query": [
+        "./packages/tanstack-query/src/index.ts"
+      ],
+      "@loopsight/tanstack-router/page": [
+        "./packages/tanstack-router/src/page.ts"
+      ],
+      "@loopsight/tanstack-router": [
+        "./packages/tanstack-router/src/index.ts"
+      ],
+      "@loopsight/tanstack-start/page": [
+        "./packages/tanstack-start/src/page.ts"
+      ],
+      "@loopsight/tanstack-start": [
+        "./packages/tanstack-start/src/index.ts"
+      ],
+      "@loopsight/tanstack-devtools/page": [
+        "./packages/tanstack-devtools/src/page.ts"
+      ],
+      "@loopsight/tanstack-devtools": [
+        "./packages/tanstack-devtools/src/index.ts"
+      ]
+    }
   },
-  "include": ["src", "test"]
+  "include": [
+    "packages/*/src",
+    "test"
+  ]
 }

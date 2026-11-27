@@ -1,0 +1,65 @@
+{
+  "name": "loopsight",
+  "description": "Lets a coding agent see a running web app and what each edit did: one timeline of the page and the dev server, traced to source lines. This package is the zero-config preset.",
+  "version": "0.0.0",
+  "type": "module",
+  "license": "MIT",
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tarekkharsa/tanstack-devtools-mcp.git",
+    "directory": "packages/loopsight"
+  },
+  "keywords": [
+    "mcp",
+    "agents",
+    "devtools",
+    "vite-plugin",
+    "tanstack",
+    "react-query",
+    "tanstack-router",
+    "hmr"
+  ],
+  "exports": {
+    "./vite": {
+      "types": "./dist/vite.d.ts",
+      "default": "./dist/vite.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "default": "./dist/client.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "default": "./dist/server.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "loopsight": "./dist/bin.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@loopsight/core": "workspace:*",
+    "@loopsight/vite": "workspace:*",
+    "@loopsight/tanstack-query": "workspace:*",
+    "@loopsight/tanstack-router": "workspace:*",
+    "@loopsight/tanstack-start": "workspace:*",
+    "@loopsight/tanstack-devtools": "workspace:*"
+  },
+  "peerDependencies": {
+    "vite": ">=6"
+  },
+  "peerDependenciesMeta": {
+    "vite": {
+      "optional": true
+    }
+  }
+}

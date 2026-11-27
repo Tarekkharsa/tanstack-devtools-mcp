@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bounded, brief } from '../src/client/serialize.js'
+import { bounded, brief } from '@loopsight/core/page'
 
 describe('bounded', () => {
   it('keeps plain JSON as it is', () => {

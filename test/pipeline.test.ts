@@ -10,10 +10,11 @@ import {
   notFound,
 } from '@tanstack/react-router'
 import { afterEach, describe, expect, it } from 'vitest'
-import { connect } from '../src/client/index.js'
-import { Hub } from '../src/server/hub.js'
-import { createMcpServer } from '../src/server/mcp.js'
-import type { ConnectOptions, SocketLike } from '../src/client/index.js'
+import { Hub, createMcpServer } from '@loopsight/core/server'
+import { connect } from 'loopsight/client'
+import { SOURCES } from './support.js'
+import type { SocketLike } from '@loopsight/core/page'
+import type { ConnectOptions } from 'loopsight/client'
 
 /** A socket whose other end is `hub`, with no network in between. */
 function linkTo(hub: Hub) {
@@ -47,7 +48,7 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
   for (const closer of closers.splice(0)) await closer()
   // Each test gets its own page-side bridge and session.
-  delete (globalThis as any).__TANSTACK_DEVTOOLS_MCP__
+  delete (globalThis as any).__LOOPSIGHT__
   delete (globalThis as any).__TANSTACK_QUERY_CLIENT__
   // TanStack Router leaves the last router here, where the bridge looks.
   delete (globalThis as any).__TSR_ROUTER__
@@ -67,7 +68,7 @@ async function setup(
   })
   cleanups.push(disconnect)
 
-  const mcp = createMcpServer(hub, server)
+  const mcp = createMcpServer(hub, { ...server, sources: SOURCES })
   const client = new Client({ name: 'test', version: '0.0.0' })
   const [a, b] = InMemoryTransport.createLinkedPair()
   await Promise.all([mcp.connect(a), client.connect(b)])
@@ -688,7 +689,7 @@ describe('after an edit', () => {
     })
     expect((await call('diagnose')).findings[0]).toMatchObject({
       severity: 'error',
-      title: 'Vite reports a build error, and no update has succeeded since',
+      title: 'The dev server reports a build error, and no update has succeeded since',
     })
   })
 
@@ -718,7 +719,7 @@ describe('after an edit', () => {
     hub.recordServer({ source: 'vite', type: 'full-reload', key: 'src/main.tsx', summary: 'full reload triggered by src/main.tsx' })
     // The page reloads: a new bridge, a new session.
     cleanups.splice(0).reverse().forEach((cleanup) => cleanup())
-    delete (globalThis as any).__TANSTACK_DEVTOOLS_MCP__
+    delete (globalThis as any).__LOOPSIGHT__
     const queryClient = new QueryClient()
     queryClient.setQueryData(['fresh'], 1)
     const pending = call('wait_for_update')
@@ -771,7 +772,7 @@ describe('documented mistakes, found in real library objects', () => {
 
     // Same app, with the fix the docs give.
     for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
-    delete (globalThis as any).__TANSTACK_DEVTOOLS_MCP__
+    delete (globalThis as any).__LOOPSIGHT__
     const fresh = await mount(
       new QueryClient({ defaultOptions: { queries: { staleTime: 60_000 } } }),
     )
@@ -821,7 +822,7 @@ describe('documented mistakes, found in real library objects', () => {
     )
 
     for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
-    delete (globalThis as any).__TANSTACK_DEVTOOLS_MCP__
+    delete (globalThis as any).__LOOPSIGHT__
     const fixed = make({
       defaultPreload: 'intent',
       defaultPreloadStaleTime: 0,

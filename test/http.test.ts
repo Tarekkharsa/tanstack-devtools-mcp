@@ -3,10 +3,9 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { afterEach, describe, expect, it } from 'vitest'
 import { WebSocket } from 'ws'
-import { createBridge, startServer } from '../src/server/http.js'
-import { Hub } from '../src/server/hub.js'
-import type { RunningServer, ServerOptions } from '../src/server/http.js'
-import type { SessionInfo } from '../src/protocol.js'
+import { Hub, createBridge } from '@loopsight/core/server'
+import { startServer } from 'loopsight/server'
+import type { RunningServer, ServerOptions, SessionInfo } from '@loopsight/core/server'
 
 let server: RunningServer | undefined
 afterEach(async () => {
@@ -89,16 +88,11 @@ describe('/mcp', () => {
     await client.connect(new StreamableHTTPClientTransport(new URL(mcpUrl)))
     try {
       const { tools } = await client.listTools()
+      // The core's tools, then each source's, in the order of the sources.
       expect(tools.map((tool) => tool.name)).toEqual([
         'list_sessions',
         'overview',
         'diagnose',
-        'list_queries',
-        'get_query',
-        'diff_query',
-        'list_mutations',
-        'get_router_state',
-        'list_routes',
         'list_events',
         'get_event',
         'count_events',
@@ -106,7 +100,14 @@ describe('/mcp', () => {
         'wait_for_update',
         'list_page_tools',
         'call_page_tool',
+        'get_router_state',
+        'list_routes',
+        'list_queries',
+        'get_query',
+        'diff_query',
+        'list_mutations',
       ])
+      expect(client.getServerVersion()?.name).toBe('loopsight')
       expect(client.getInstructions()).toMatch(/Start with overview/)
 
       await expect
@@ -221,7 +222,7 @@ describe('the bridge on a server that is not ours', () => {
   async function host(options: { allowHost?: (host: string | undefined) => boolean } = {}) {
     const hub = new Hub()
     const bridge = createBridge(hub, {
-      path: '/__tanstack-devtools-mcp/bridge',
+      path: '/__loopsight/bridge',
       sameOrigin: true,
       ...(options.allowHost ? { hostAllowed: options.allowHost } : {}),
     })
@@ -243,7 +244,7 @@ describe('the bridge on a server that is not ours', () => {
           http.close(() => resolve())
         }),
     )
-    return { hub, port, others, url: `ws://127.0.0.1:${port}/__tanstack-devtools-mcp/bridge` }
+    return { hub, port, others, url: `ws://127.0.0.1:${port}/__loopsight/bridge` }
   }
   const closers: Array<() => Promise<void>> = []
   afterEach(async () => {

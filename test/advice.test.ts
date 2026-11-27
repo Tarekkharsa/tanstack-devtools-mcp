@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { KNOWN_MESSAGES, RULES } from '../src/server/advice.js'
-import { diagnose } from '../src/server/diagnose.js'
-import type { EntrySource, LogEntry } from '../src/protocol.js'
-import type { Facts, QueryFact, RouteFact } from '../src/server/rules.js'
+import { diagnose as run } from '@loopsight/core/server'
+import { MESSAGES as KNOWN_MESSAGES, PARTS, RULES, check, live, recorded } from './support.js'
+import type { EntrySource, LogEntry } from '@loopsight/core/server'
+import type { QueryFact, QueryFacts } from '@loopsight/tanstack-query'
+import type { RouteFact, RouterFacts } from '@loopsight/tanstack-router'
+import type { Setup } from './support.js'
+
+const diagnose = (entries: Array<LogEntry>, setup: Setup | null) =>
+  run(entries, live(setup), 0, PARTS)
 
 /** Builds a log where each entry sits at an explicit time. */
 function log() {
@@ -14,7 +19,7 @@ function log() {
     summary: string,
     extra: Partial<LogEntry> = {},
   ) => {
-    entries.push({ n: entries.length + 1, t, source, type, summary, ...extra })
+    entries.push(recorded({ n: entries.length + 1, t, source, type, summary, ...extra }))
     return add
   }
   return { entries, add }
@@ -51,8 +56,8 @@ const match = (
 const routerFacts = (
   options: Record<string, unknown> = {},
   matches: Array<RouteFact> = [],
-): NonNullable<Facts['routerFacts']> => ({
-  options: { has: [], ...options } as NonNullable<Facts['routerFacts']>['options'],
+): RouterFacts => ({
+  options: { has: [], ...options } as RouterFacts['options'],
   contextKeys: [],
   routeCount: matches.length,
   matches,
@@ -61,30 +66,33 @@ const routerFacts = (
 const queryFacts = (
   queries: Array<QueryFact>,
   defaults: Record<string, unknown> = {},
-): NonNullable<Facts['queryFacts']> => ({ defaults, queries })
-
-function check(id: string, entries: Array<LogEntry>, facts: Facts | null = null) {
-  const rule = RULES.find((candidate) => candidate.id === id)
-  if (!rule) throw new Error(`No rule ${id}`)
-  return rule.check({
-    entries,
-    facts,
-    by: (source, ...types) =>
-      entries.filter((entry) => entry.source === source && types.includes(entry.type)),
-  })
-}
+): QueryFacts => ({ defaults, queries })
 
 describe('the catalogue', () => {
-  it('gives every rule and message a fix and a source, under a unique id', () => {
+  it('gives every rule and message a unique id, and each documented one its fix and source', () => {
     const ids = [...RULES.map((rule) => rule.id), ...KNOWN_MESSAGES.map((message) => message.id)]
     expect(new Set(ids).size).toBe(ids.length)
-    for (const item of [...RULES, ...KNOWN_MESSAGES]) {
-      expect(item.fix.length, item.id).toBeGreaterThan(40)
-      expect(item.docs.label, item.id).not.toBe('')
-      expect(item.docs.at, item.id).toMatch(/^(https:\/\/|@[\w-]+\/[\w-]+: )/)
+    // A rule that only reports a recorded failure has nothing to cite.
+    const documented = [...RULES.filter((rule) => rule.docs !== undefined), ...KNOWN_MESSAGES]
+    for (const item of documented) {
+      expect(item.fix?.length ?? 0, item.id).toBeGreaterThan(40)
+      expect(item.docs!.label, item.id).not.toBe('')
+      expect(item.docs!.at, item.id).toMatch(/^(https:\/\/|@[\w-]+\/[\w-]+: )/)
     }
-    expect(RULES).toHaveLength(30)
-    expect(KNOWN_MESSAGES).toHaveLength(25)
+    expect(RULES.filter((rule) => rule.docs === undefined).map((rule) => rule.id)).toEqual([
+      'core/build-error',
+      'core/hydration-mismatch',
+      'core/uncaught',
+      'core/failed-requests',
+      'core/duplicate-requests',
+      'router/match-error',
+      'query/in-error',
+      'query/failed-mutations',
+      'query/fetch-loop',
+    ])
+    expect(documented).toHaveLength(31 + 25)
+    // Every rule names the package it comes from.
+    for (const id of ids) expect(id).toMatch(/^(core|query|router|start|devtools|vite)\//)
   })
 })
 
@@ -325,7 +333,7 @@ describe('TanStack Query rules', () => {
 
 describe('TanStack Router rules', () => {
   it('preload-cache-with-query: preloading on, defaultPreloadStaleTime not 0', () => {
-    const facts = (options: Record<string, unknown>, withQuery = true): Facts => ({
+    const facts = (options: Record<string, unknown>, withQuery = true): Setup => ({
       routerFacts: routerFacts(options),
       queryFacts: withQuery ? queryFacts([]) : null,
     })
@@ -368,11 +376,11 @@ describe('TanStack Router rules', () => {
     ])
     expect(check('router/loader-deps-whole-search', [], { routerFacts: routerFacts({}, [match('/list')]) })).toEqual([])
 
-    const mixed = { routerFacts: routerFacts(), modules: ['react-router-dom'] }
+    const mixed = { routerFacts: { ...routerFacts(), modules: ['react-router-dom'] } }
     expect(check('router/leftover-react-router', [], mixed)).toMatchObject([
       { evidence: ['Loaded: react-router-dom'] },
     ])
-    expect(check('router/leftover-react-router', [], { routerFacts: routerFacts(), modules: [] })).toEqual([])
+    expect(check('router/leftover-react-router', [], { routerFacts: { ...routerFacts(), modules: [] } })).toEqual([])
   })
 
   it('recreated: a new router with no hot update to explain it', () => {
@@ -604,7 +612,7 @@ describe('messages the libraries print', () => {
     const titles = diagnose(entries, null).findings.map((finding) => finding.title)
     expect(titles).toEqual([
       'A query function resolved to undefined',
-      'console.error called with 2 distinct messages',
+      'console.error called with 1 distinct message',
     ])
   })
 

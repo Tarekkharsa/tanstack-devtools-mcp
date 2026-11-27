@@ -1,12 +1,14 @@
-# tanstack-devtools-mcp
+# loopsight
 
-An MCP server that lets a coding agent see inside a running TanStack app, and see what each of its edits did.
+Lets a coding agent see a running web app, and see what each of its edits did.
 
-One Vite plugin, no code in the app. The agent gets the Query cache, the Router, network calls, console errors and Vite's own hot updates and build errors on a single numbered timeline, with each entry traced back to the source line it came from.
+After the agent saves a file, one call tells it whether the edit compiled, whether the page hot-updated or reloaded, and what the app did next, on a single numbered timeline where each entry is traced back to the source line it came from. It is served over MCP, so any agent can use it.
 
-Unofficial and experimental. Not affiliated with TanStack. Not on npm yet.
+It is built from small parts. A **core** that knows no library, **sources** that each teach it one library, and a **host** that connects it to a dev server. TanStack Query, Router and Start on Vite work with one line of config and no code in the app; anything else can be added as a source without changing the core.
 
-The idea comes from [`@effect/ui-devtools`](https://github.com/Effect-TS/ui/tree/main/packages/ui-devtools), which gives agents a local MCP endpoint over an app's message log. This brings that to apps already written with React, TanStack and Vite, and adds the half of the loop that sits in the dev server.
+Unofficial and experimental. Not affiliated with TanStack or Vite. Not on npm yet.
+
+The idea comes from [`@effect/ui-devtools`](https://github.com/Effect-TS/ui/tree/main/packages/ui-devtools), which gives agents a local MCP endpoint over an app's message log. This brings that to apps already written with other libraries, and adds the half of the loop that sits in the dev server.
 
 ## What an agent can do with it
 
@@ -54,8 +56,8 @@ diagnose
 ## Try it
 
 ```sh
-git clone https://github.com/Tarekkharsa/tanstack-devtools-mcp
-cd tanstack-devtools-mcp
+git clone https://github.com/Tarekkharsa/tanstack-devtools-mcp loopsight
+cd loopsight
 pnpm install
 pnpm example
 ```
@@ -63,7 +65,7 @@ pnpm example
 Open the URL Vite prints, then connect your agent to `http://127.0.0.1:4777/mcp`. For Claude Code:
 
 ```sh
-claude mcp add --transport http tanstack http://127.0.0.1:4777/mcp
+claude mcp add --transport http loopsight http://127.0.0.1:4777/mcp
 ```
 
 Or in `.mcp.json`:
@@ -71,7 +73,7 @@ Or in `.mcp.json`:
 ```json
 {
   "mcpServers": {
-    "tanstack": { "type": "http", "url": "http://127.0.0.1:4777/mcp" }
+    "loopsight": { "type": "http", "url": "http://127.0.0.1:4777/mcp" }
   }
 }
 ```
@@ -80,16 +82,17 @@ Or in `.mcp.json`:
 
 ```ts
 // vite.config.ts
-import { tanstackDevtoolsMcp } from 'tanstack-devtools-mcp/vite'
+import { loopsight } from 'loopsight/vite'
 
 export default defineConfig({
-  plugins: [tanstackDevtoolsMcp()],
+  plugins: [loopsight()],
 })
 ```
 
 That is the whole setup. The plugin runs with `vite dev` only, and:
 
 - connects every page the dev server serves, through `index.html` for a single-page app and through Vite's own client for a framework that renders the document on the server, such as TanStack Start
+- turns on each built-in source whose library the app has installed, and leaves the others out, tools and all
 - finds the router on `window.__TSR_ROUTER__`, where TanStack Router puts it
 - finds the `QueryClient` in the router context (`context.queryClient`) or on `window.__TANSTACK_QUERY_CLIENT__`
 
@@ -97,31 +100,141 @@ If your `QueryClient` is in neither place, hand it over:
 
 ```ts
 if (import.meta.env.DEV) {
-  const { connect } = await import('tanstack-devtools-mcp/client')
+  const { connect } = await import('loopsight/client')
   connect({ queryClient })
 }
 ```
 
+## How it is put together
+
+| Package | What it is |
+| --- | --- |
+| `@loopsight/core` | The page bridge, the session log, the rule engine and the ten tools that need no library: the timeline, `diagnose`, the waits, sessions and page tools. It records the console and the network by itself. |
+| `@loopsight/vite` | The host for Vite. Connects every page, records hot updates, reloads and build errors, maps stack frames to source lines, and registers the tools with Vite DevTools when it is on. |
+| `@loopsight/tanstack-query` | A source: cache and mutation events, four read tools, two actions, 15 rules. |
+| `@loopsight/tanstack-router` | A source: navigation events, two read tools, two actions, 12 rules. |
+| `@loopsight/tanstack-start` | A source: names server functions in the network log, and adds five rules. |
+| `@loopsight/tanstack-devtools` | A source: the TanStack Devtools event bus. |
+| `loopsight` | The preset: the Vite host with the four sources above, plus the `loopsight` command. |
+
+To choose the sources yourself, pass them. This is `loopsight()` spelled out:
+
+```ts
+import { loopsightVite } from '@loopsight/vite'
+import { tanstackQuery } from '@loopsight/tanstack-query'
+import { tanstackRouter } from '@loopsight/tanstack-router'
+
+loopsightVite({ sources: [tanstackRouter(), tanstackQuery(), myStore()] })
+```
+
+With `sources: []` you get the core alone: console, network, the dev server and the page tools, for any app Vite serves.
+
+### Adding a library
+
+A source has two halves. The page half records what the library does and answers questions about it; the server half says which tools an agent gets and which rules judge it. Neither half touches the core.
+
+```ts
+// my-store/page.ts: runs in the browser
+import type { PageSource } from '@loopsight/core/page'
+
+const source: PageSource<Store> = {
+  key: 'cart',
+  instance: {
+    label: 'cart store',
+    accepts: (value): value is Store => typeof (value as Store)?.subscribe === 'function',
+    globals: ['__CART_STORE__'], // watched, so it attaches the moment the app sets it
+    find: ({ global }) => global.__CART_STORE__,
+    missing: 'No cart store on this page. Pass it to connect({ instances: { cart } }).',
+  },
+  attach: (store, { record }) => ({
+    stop: store.subscribe(({ item, quantity }) =>
+      record({ source: 'cart', type: 'set', key: item, summary: `${item} = ${quantity}`, detail: { quantity } }),
+    ),
+    handlers: { 'cart.state': () => store.getState() },
+    overview: () => ({ lines: Object.keys(store.getState().items).length }),
+    facts: () => ({ max: 99 }),
+  }),
+}
+export default source
+```
+
+```ts
+// my-store/index.ts: runs in Node
+import { fileURLToPath } from 'node:url'
+import type { ServerSource, SourceDescriptor } from '@loopsight/core/server'
+
+const server: ServerSource = {
+  key: 'cart',
+  title: 'Cart',
+  about: 'get_cart reads what is in the cart.',
+  writes: { cart: 'changes to the cart' },
+  tools: [
+    {
+      name: 'get_cart',
+      description: 'What is in the cart now.',
+      input: {},
+      run: (_args, { call }) => call('cart.state'),
+    },
+  ],
+  rules: [
+    {
+      id: 'cart/over-limit',
+      fix: 'Clamp the quantity to the limit before writing it to the store.',
+      docs: { label: 'Cart docs: Limits', at: 'https://example.com/cart/limits' },
+      check: ({ by, facts }) => {
+        const max = facts<{ max: number }>('cart')?.max ?? Infinity
+        const over = by('cart', 'set').filter((entry) => (entry.detail as { quantity: number }).quantity > max)
+        return over.length === 0
+          ? []
+          : [{ severity: 'warning', title: `An item was set above the limit of ${max}`, entries: over.map((e) => e.n), evidence: over.map((e) => e.summary) }]
+      },
+    },
+  ],
+}
+
+export function myStore(): SourceDescriptor {
+  return {
+    key: 'cart',
+    server,
+    page: fileURLToPath(new URL('./page.js', import.meta.url)),
+    detect: ['my-store'], // left out of apps that do not have the library
+  }
+}
+```
+
+What that buys: `get_cart` next to the other tools, the store's changes on the same timeline as navigations and requests, `overview.cart`, the rule's finding in `diagnose` with its fix and source, and `wait_for_idle` holding while the source says it is busy. A tool marked `action: true` is registered only when actions are on. [`test/custom-source.test.ts`](test/custom-source.test.ts) is this example, running.
+
+A rule reads recorded facts (`detail`, the `facts` a page half reports), never the wording of a summary, so a source can reword what it shows without breaking a rule.
+
+A host is the other kind of part: whatever serves the page and can see the dev server. Vite is the one that exists. One for another bundler would use the same pieces the Vite host does, all exported from `@loopsight/core/server`: `startServer` or `createBridge` to accept pages, `hub.recordServer` for what the dev server does, a `resolveFrame` function for source maps, and `registerOnAgentHost` to put the tools on a shared MCP route.
+
 ## Tools
+
+From the core, in every setup:
 
 | Tool | Does |
 | --- | --- |
-| `overview` | the page in one call: URL, matched routes, the cache by status, what is fetching or failed, pending requests, the latest problems |
+| `overview` | the page in one call: URL, each source's summary, pending requests, the latest problems |
 | `diagnose` | what is wrong and what the libraries document as a mistake, each with evidence, the documented fix and its source |
-| `wait_for_update` | after an edit: what Vite did, then what the page did; follows the page across a reload |
-| `wait_for_idle` | waits for queries, mutations, the router and requests to settle, and returns what happened since an entry |
+| `wait_for_update` | after an edit: what the dev server did, then what the page did; follows the page across a reload |
+| `wait_for_idle` | waits for every source and the network to settle, and returns what happened since an entry |
 | `list_events` | the timeline, filtered by source, type, key, text, or `problems: true` |
 | `get_event` | one event in full, with its app stack frames |
 | `count_events` | events counted by source and type |
+| `list_sessions` | the pages that connected, what each has, and whether it is still open |
+| `list_page_tools` | the tools libraries registered in the page |
+| `call_page_tool` | runs one of them |
+
+From the TanStack Query and Router sources:
+
+| Tool | Does |
+| --- | --- |
 | `list_queries` | the query cache as compact rows, with counts by status and by key family |
 | `get_query` | one query: data, error, and where in the source it is used; `path` reads a subtree in full |
 | `diff_query` | what the last change to a query's data changed, by path |
 | `list_mutations` | the last 100 mutations with status, variables and error |
 | `get_router_state` | status, location, and each matched route's params, search, error and loader data |
 | `list_routes` | the routes, with a `contains` filter for large apps |
-| `list_sessions` | the pages that connected and whether each is still open |
-| `list_page_tools` | the tools libraries registered in the page |
-| `call_page_tool` | runs one of them |
 
 With `actions: true`:
 
@@ -134,7 +247,9 @@ With `actions: true`:
 
 ### What `diagnose` checks
 
-Every rule below comes from a library's own material, and each finding carries a `fix` restating it and a `docs` reference: a URL, or the path of an agent skill the library ships inside its npm package, which an agent can open in `node_modules`. The thresholds (how many fetches, how many milliseconds) are this package's; the sources give none.
+The core reports plain failures by itself: a build error, an uncaught error, a failed request, the same request in flight twice. Each source adds its own, and every finding names its rule (`query/hydrated-refetch`, `vite/fast-refresh-defeated`).
+
+Every rule below comes from a library's own material, and each finding carries a `fix` restating it and a `docs` reference: a URL, or the path of an agent skill the library ships inside its npm package, which an agent can open in `node_modules`. The thresholds (how many fetches, how many milliseconds) are this project's; the sources give none.
 
 From the TanStack Query guides:
 
@@ -184,9 +299,9 @@ Findings of severity `info` are judgment calls: a waterfall can be a real depend
 | --- | --- |
 | `query`, `mutation` | cache events, with the time each fetch took and the code that started it |
 | `router` | navigation events, with the time to resolve and any route error |
-| `network` | `fetch` and `XMLHttpRequest`: method, URL, status and time. Bodies and headers are never read. TanStack Start server functions are shown by name |
+| `network` | `fetch` and `XMLHttpRequest`: method, URL, status and time. Bodies and headers are never read. A source can name the requests it understands; the Start source shows server functions by name |
 | `console` | `console.error`, `console.warn`, uncaught errors and unhandled rejections. A message repeated within five seconds is recorded once, then once more with the count |
-| `vite` | a module changed, a hot update, a full reload, a module that could not be updated in place and why, a build error, an error the dev server logged |
+| `vite` | from the Vite host: a module changed, a hot update, a full reload, a module that could not be updated in place and why, a build error, an error the dev server logged |
 | `bus` | TanStack Devtools event-bus events, when that panel is mounted |
 
 The server keeps its own copy, 1,000 entries per session by default (`size`). `list_events`, `get_event`, `count_events` and `diagnose` answer from that copy, so they still work after a reload or a closed tab. A page that loads after a reload starts its log with the Vite event that caused it.
@@ -195,13 +310,13 @@ Outputs are sized for an agent's context. Rows leave out fields at their usual v
 
 ### Actions are off by default
 
-The read tools cannot change your app. The four action tools are registered only with `tanstackDevtoolsMcp({ actions: true })` or `--actions`. `call_page_tool` runs a registered tool without that flag only when the tool declares `readOnlyHint: true`.
+The read tools cannot change your app. A source's action tools are registered only with `loopsight({ actions: true })` or `--actions`. `call_page_tool` runs a registered tool without that flag only when the tool declares `readOnlyHint: true`.
 
 ### Tools from other libraries
 
 TanStack Devtools has a registry for agent tools, [`@tanstack/devtools-webmcp`](https://github.com/TanStack/devtools/tree/main/packages/devtools-webmcp). A library calls `registerDevtoolsTools` and the tools land in the browser's WebMCP API, `document.modelContext`. Today that reaches only agents driving a browser that ships WebMCP.
 
-This package serves the same tools over the Node MCP endpoint, so any agent can call them:
+loopsight serves the same tools over the Node MCP endpoint, so any agent can call them:
 
 ```ts
 import { registerDevtoolsTools } from '@tanstack/devtools-webmcp'
@@ -233,7 +348,7 @@ If the app runs [Vite DevTools](https://github.com/vitejs/devtools), the same to
 // vite.config.ts
 export default defineConfig({
   devtools: true,
-  plugins: [tanstackDevtoolsMcp()],
+  plugins: [loopsight()],
 })
 ```
 
@@ -241,7 +356,7 @@ export default defineConfig({
 pnpm add -D @vitejs/devtools @devframes/agentic
 ```
 
-Vite DevTools mounts its MCP route only when `@devframes/agentic` is installed. The tools appear there as `tanstack_overview`, `tanstack_diagnose` and so on, at `/__devtools/__mcp` on the dev server's own port.
+Vite DevTools mounts its MCP route only when `@devframes/agentic` is installed. The tools appear there as `loopsight_overview`, `loopsight_diagnose` and so on, at `/__devtools/__mcp` on the dev server's own port.
 
 That route is stricter than this package's endpoint in one way that matters when connecting: it refuses any request without a loopback `Origin` header. Claude Code does not send one by itself, and reports the refusal as "needs authentication", so set it:
 
@@ -262,7 +377,7 @@ A client that cannot set headers can go through `npx devframe connect` instead, 
 To have that route as the only endpoint, turn this package's own off:
 
 ```ts
-tanstackDevtoolsMcp({ standalone: false })
+loopsight({ standalone: false })
 ```
 
 The page then connects through the dev server it was served from, and no second port opens. In Vite's middleware mode the dev server has no HTTP server of its own, so pass your app's server as `server.hmr.server`, which is where Vite puts its own WebSocket too.
@@ -271,7 +386,7 @@ The page then connects through the dev server it was served from, and no second 
 | --- | --- | --- |
 | Address | `http://127.0.0.1:4777/mcp`, fixed | `/__devtools/__mcp` on the dev server's port |
 | `Origin` header | must be absent | must be a loopback origin |
-| Tool names | `overview` | `tanstack_overview` |
+| Tool names | `overview` | `loopsight_overview` |
 | Needs | nothing else | Vite DevTools enabled, `@devframes/agentic` installed |
 
 ## Without Vite
@@ -279,10 +394,12 @@ The page then connects through the dev server it was served from, and no second 
 Run the server on its own and connect the page yourself:
 
 ```sh
-tanstack-devtools-mcp [--port <n>] [--size <n>] [--actions] [--origin <url>]...
+loopsight [--port <n>] [--size <n>] [--actions] [--origin <url>]...
 ```
 
 ```ts
+import { connect } from 'loopsight/client'
+
 connect({ url: 'ws://127.0.0.1:4777/bridge', queryClient, router })
 ```
 
@@ -302,7 +419,7 @@ There is no token. Any process on your machine can connect, as it can to the Vit
 
 ## Status and limits
 
-Verified: React 19, TanStack Query 5, TanStack Router 1.170, Vite 8 and Chrome, on a single-page app and on a production-sized TanStack Start app under Vite+. `pnpm test` runs the unit and HTTP tests and `pnpm e2e` drives the example in headless Chrome through the MCP endpoint, including a hot update, a build error and its fix. The Vite DevTools route is driven the same way with `@vitejs/devtools` 0.8.3. By hand: a Claude Code run was connected to that route, and the tools were called through it with `standalone: false` on a server-rendered app under Vite+ with `@vitejs/devtools` 0.8.0.
+Verified: React 19, TanStack Query 5, TanStack Router 1.170, Vite 8 and Chrome, on a single-page app and on a production-sized TanStack Start app under Vite+. `pnpm test` runs the unit and HTTP tests and `pnpm e2e` drives the example in headless Chrome through the MCP endpoint, including a hot update, a build error and its fix. The packages were also packed and installed into a fresh project, to check they work from `node_modules` and not only from this workspace. The Vite DevTools route is driven the same way with `@vitejs/devtools` 0.8.3. By hand: a Claude Code run was connected to that route, and the tools were called through it with `standalone: false` on a server-rendered app under Vite+ with `@vitejs/devtools` 0.8.0. Those two hand checks were made before the split into packages; after it, the standalone endpoint was run again on that app (connection, reads, `diagnose`, a reported reload).
 
 Not verified: the Vue, Solid, Svelte and Angular adapters, and Vite below 8. The page-side code reads Query and Router by shape, not by import, so they may work.
 
@@ -312,14 +429,15 @@ Known limits:
 - **Nothing from the server side of an SSR app.** Loaders and server functions that run in Node are seen only as the requests the browser made.
 - **No time travel.** Effect UI can repaint the page at any past entry because its state is one message log. Query and Router have no equivalent to replay; `diff_query` shows the last change only.
 - **No panel.** This has no UI of its own.
-- **TanStack Form, Table, Store, Pacer and DB have no built-in tools.** They can register their own through `@tanstack/devtools-webmcp`.
+- **Four built-in sources, all TanStack, and one host, Vite.** TanStack Form, Table, Store, Pacer and DB have none; nor do other state or data libraries. A library can register tools through `@tanstack/devtools-webmcp`, or be given a source as shown above. No source from outside this repository exists yet, so the contracts have been tried by one author only and may still change.
 - **`diagnose` reads what happened; it does not read your code.** Its rules are tied to documented mistakes, but their thresholds are heuristics, and a quiet result means nothing matched, not that nothing is wrong. TanStack Form and Table have no rules yet.
 
 ## Development
 
 ```sh
-pnpm test        # unit and HTTP tests
-pnpm e2e         # the example in headless Chrome; needs Google Chrome
+pnpm build       # every package, in dependency order
+pnpm test        # unit and HTTP tests, run on the source
+pnpm e2e         # builds, then drives the example in headless Chrome; needs Google Chrome
 pnpm typecheck
 ```
 
