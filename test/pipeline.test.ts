@@ -1,12 +1,13 @@
 // @vitest-environment happy-dom
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
-import { QueryClient } from '@tanstack/query-core'
+import { QueryClient, QueryObserver } from '@tanstack/query-core'
 import {
   createMemoryHistory,
   createRootRoute,
   createRoute,
   createRouter,
+  notFound,
 } from '@tanstack/react-router'
 import { afterEach, describe, expect, it } from 'vitest'
 import { connect } from '../src/client/index.js'
@@ -394,6 +395,48 @@ describe('router', () => {
   })
 })
 
+describe('a route that answers not found', () => {
+  it('is reported as not found, not as an error', async () => {
+    const root = createRootRoute()
+    const index = createRoute({ getParentRoute: () => root, path: '/' })
+    const page = createRoute({
+      getParentRoute: () => root,
+      path: '/pages/$slug',
+      loader: ({ params }) => {
+        if (params.slug === 'missing') throw notFound()
+        if (params.slug === 'broken') throw new Error('database is down')
+        return { slug: params.slug }
+      },
+    })
+    const router = createRouter({
+      routeTree: root.addChildren([index, page]),
+      history: createMemoryHistory({ initialEntries: ['/'] }),
+    })
+    await router.load()
+    const { call } = await setup({ router }, { actions: true })
+
+    await call('navigate', { to: '/pages/$slug', params: { slug: 'missing' } })
+    await call('wait_for_idle')
+    const missing = await call('overview')
+    expect(missing.router.notFound).toBe('/pages/$slug')
+    expect(missing.router).not.toHaveProperty('error')
+    expect((await call('list_events', { type: 'onResolved' })).entries.at(-1).summary).toBe(
+      '/ → /pages/missing (not found, from /pages/$slug)',
+    )
+    expect((await call('list_events', { problems: true })).matched).toBe(0)
+    const titles = (await call('diagnose')).findings.map((f: any) => f.title)
+    expect(titles).not.toContain('A matched route is showing an error')
+
+    await call('navigate', { to: '/pages/$slug', params: { slug: 'broken' } })
+    await call('wait_for_idle')
+    const broken = await call('overview')
+    expect(broken.router.error).toBe('/pages/$slug: Error: database is down')
+    expect((await call('diagnose')).findings.map((f: any) => f.title)).toContain(
+      'A matched route is showing an error',
+    )
+  })
+})
+
 describe('the log', () => {
   it('stays readable after the page disconnects, within its size', async () => {
     const queryClient = new QueryClient()
@@ -677,5 +720,113 @@ describe('after an edit', () => {
       'vite/full-reload',
       'query/attached',
     ])
+  })
+})
+
+describe('documented mistakes, found in real library objects', () => {
+  const rulesIn = async (call: (name: string) => Promise<any>) =>
+    (await call('diagnose')).findings.map((finding: any) => finding.rule).filter(Boolean)
+
+  it('server-rendered data that refetches on load, and the default that stops it', async () => {
+    const posts = [{ id: 1 }]
+    const mount = async (queryClient: QueryClient) => {
+      // As a server render leaves it: in the cache before the page connects.
+      queryClient.setQueryData(['posts'], posts)
+      const context = await setup({ queryClient })
+      const observer = new QueryObserver(queryClient, {
+        queryKey: ['posts'],
+        queryFn: async () => posts,
+      })
+      cleanups.push(observer.subscribe(() => {}))
+      await context.call('wait_for_idle')
+      return context
+    }
+
+    const stale = await mount(new QueryClient())
+    const { findings } = await stale.call('diagnose')
+    const finding = findings.find((f: any) => f.rule === 'query/hydrated-refetch')
+    expect(finding).toMatchObject({
+      severity: 'warning',
+      title: '1 query sent by the server render fetched again as the page loaded',
+      evidence: ['["posts"]'],
+      docs: { at: 'https://tanstack.com/query/latest/docs/framework/react/guides/ssr' },
+    })
+    expect(finding.fix).toMatch(/default `staleTime` above 0/)
+
+    // Same app, with the fix the docs give.
+    for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
+    delete (globalThis as any).__TANSTACK_DEVTOOLS_MCP__
+    const fresh = await mount(
+      new QueryClient({ defaultOptions: { queries: { staleTime: 60_000 } } }),
+    )
+    expect((await fresh.call('count_events')).counts).not.toHaveProperty('query/fetch')
+    expect(await rulesIn(fresh.call)).not.toContain('query/hydrated-refetch')
+  })
+
+  it('a prefetch followed by a mount refetch', async () => {
+    const queryClient = new QueryClient()
+    const { call } = await setup({ queryClient })
+    const options = { queryKey: ['post', 1], queryFn: async () => ({ id: 1 }) }
+    // What a loader does, then what the component does when it mounts.
+    await queryClient.fetchQuery(options)
+    const observer = new QueryObserver(queryClient, options)
+    cleanups.push(observer.subscribe(() => {}))
+    await call('wait_for_idle')
+    const { findings } = await call('diagnose')
+    expect(findings.find((f: any) => f.rule === 'query/fetched-twice')).toMatchObject({
+      title: 'A query fetched, then fetched again within 2 s with nothing invalidating it',
+      docs: { label: 'TanStack Query docs: Prefetching' },
+    })
+  })
+
+  it("the router's preload cache left on beside Query, found through the router alone", async () => {
+    const make = (options: Record<string, unknown>) => {
+      const root = createRootRoute()
+      const index = createRoute({ getParentRoute: () => root, path: '/' })
+      return createRouter({
+        routeTree: root.addChildren([index]),
+        history: createMemoryHistory({ initialEntries: ['/'] }),
+        context: { queryClient: new QueryClient() },
+        ...options,
+      })
+    }
+    const router = make({ defaultPreload: 'intent' })
+    await router.load()
+    // No queryClient is passed: it is found in the router context.
+    const first = await setup({ router })
+    expect((await first.call('list_sessions')).sessions[0].has).toEqual({ query: true, router: true })
+    const rules = await rulesIn(first.call)
+    expect(rules).toEqual(
+      expect.arrayContaining([
+        'router/preload-cache-with-query',
+        'router/no-not-found-component',
+        'router/no-error-component',
+      ]),
+    )
+
+    for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
+    delete (globalThis as any).__TANSTACK_DEVTOOLS_MCP__
+    const fixed = make({
+      defaultPreload: 'intent',
+      defaultPreloadStaleTime: 0,
+      defaultNotFoundComponent: () => null,
+      defaultErrorComponent: () => null,
+    })
+    await fixed.load()
+    const second = await setup({ router: fixed })
+    expect(await rulesIn(second.call)).toEqual([])
+    expect((await second.call('diagnose')).ok).toBe(true)
+  })
+
+  it('a QueryClient replaced during one page load', async () => {
+    ;(globalThis as any).__TANSTACK_QUERY_CLIENT__ = new QueryClient()
+    const { call } = await setup()
+    await expect
+      .poll(async () => (await call('list_sessions')).sessions[0].has.query)
+      .toBe(true)
+    expect(await rulesIn(call)).not.toContain('query/client-recreated')
+
+    ;(globalThis as any).__TANSTACK_QUERY_CLIENT__ = new QueryClient()
+    await expect.poll(() => rulesIn(call)).toContain('query/client-recreated')
   })
 })

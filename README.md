@@ -40,7 +40,16 @@ get_query { "queryHash": "[\"posts\"]" }
  45  router/onResolved       91 ms  /posts → /posts/2
 ```
 
-**Ask what is wrong.** `diagnose` reads the log and the live page and returns findings with evidence: build errors, uncaught errors, failed requests, failed queries and routes, a query refetching in a loop, the same request in flight twice, hydration mismatches, and the slowest queries, requests and navigations.
+**Ask what is wrong, and get the documented fix.** `diagnose` reads the log and the live page. Besides plain failures (build errors, uncaught errors, failed requests, queries and routes), it checks for the mistakes the libraries' own documentation names, and answers each with the recommended way and where it says so:
+
+```
+diagnose
+→ [warning] 3 queries sent by the server render fetched again as the page loaded
+    fix:  Set a default `staleTime` above 0 on the QueryClient (the docs use `60 * 1000`). With the
+          default of 0, data the server just rendered counts as stale and is fetched again on page load.
+    docs: TanStack Query docs: Server Rendering & Hydration
+          https://tanstack.com/query/latest/docs/framework/react/guides/ssr
+```
 
 ## Try it
 
@@ -98,7 +107,7 @@ if (import.meta.env.DEV) {
 | Tool | Does |
 | --- | --- |
 | `overview` | the page in one call: URL, matched routes, the cache by status, what is fetching or failed, pending requests, the latest problems |
-| `diagnose` | findings with evidence, as above |
+| `diagnose` | what is wrong and what the libraries document as a mistake, each with evidence, the documented fix and its source |
 | `wait_for_update` | after an edit: what Vite did, then what the page did; follows the page across a reload |
 | `wait_for_idle` | waits for queries, mutations, the router and requests to settle, and returns what happened since an entry |
 | `list_events` | the timeline, filtered by source, type, key, text, or `problems: true` |
@@ -123,6 +132,51 @@ With `actions: true`:
 | `navigate` | navigates with the router |
 | `invalidate_router` | reruns the matched routes' loaders |
 
+### What `diagnose` checks
+
+Every rule below comes from a library's own material, and each finding carries a `fix` restating it and a `docs` reference: a URL, or the path of an agent skill the library ships inside its npm package, which an agent can open in `node_modules`. The thresholds (how many fetches, how many milliseconds) are this package's; the sources give none.
+
+From the TanStack Query guides:
+
+- data sent by the server render fetched again as the page loads
+- a prefetch or loader fetch followed by a second fetch when the component mounts
+- a failed HTTP response inside a query that ended as a success
+- a query with no `staleTime` fetching again and again
+- refetch triggers switched off while `staleTime` is 0
+- an invalidation of a query that cannot refetch (disabled, or `staleTime: 'static'`)
+- queries paused while other requests succeed
+- an infinite query holding many pages with no `maxPages`
+- `gcTime: 0` on server-rendered queries
+- a `QueryClient` recreated during one page load
+- a query that starts only when another finishes
+
+From the skills shipped in `@tanstack/react-router` and `@tanstack/router-core`:
+
+- Router's preload cache left on while the app uses Query
+- no not-found component, no error component, or the deprecated `notFoundRoute`
+- `loaderDeps` returning the whole search object
+- a router recreated during one page load
+- React Router loaded next to TanStack Router
+- a page that renders and then redirects at once, with no `beforeLoad` on its routes
+- queries that start only after the route has rendered
+- a loader refetching data it already had, holding up the navigation
+- a background query whose failure became an unhandled rejection
+
+From the skills shipped in the TanStack Start packages, the `@vitejs/plugin-react` README and Vite's troubleshooting guide:
+
+- a hydration mismatch
+- a child route setting `ssr: true` under a parent that turned it down
+- a loader fetching the app's own `/api/...` over HTTP instead of calling a server function
+- server functions running one after another
+- a slow navigation with no pending component
+- a component file whose other exports defeat Fast Refresh
+- a component file that reloads the whole page on every edit
+- requests rejected with 431
+
+It also recognises 25 warnings and errors that TanStack Query, Router, Start and Vite print themselves, such as "Query data cannot be undefined" or "Mocked import used in dev client", and pairs each with its documented fix.
+
+Findings of severity `info` are judgment calls: a waterfall can be a real dependency, a late query can be data the page does not need at first. Their hint says when to ignore them. What can only be seen in source code is left to the linters: `@tanstack/eslint-plugin-query`, `@tanstack/eslint-plugin-router` and `eslint-plugin-react-refresh`.
+
 ### The timeline
 
 | Source | Records |
@@ -131,7 +185,7 @@ With `actions: true`:
 | `router` | navigation events, with the time to resolve and any route error |
 | `network` | `fetch` and `XMLHttpRequest`: method, URL, status and time. Bodies and headers are never read. TanStack Start server functions are shown by name |
 | `console` | `console.error`, `console.warn`, uncaught errors and unhandled rejections. A message repeated within five seconds is recorded once, then once more with the count |
-| `vite` | a module changed, a hot update, a full reload, a build error, an error the dev server logged |
+| `vite` | a module changed, a hot update, a full reload, a module that could not be updated in place and why, a build error, an error the dev server logged |
 | `bus` | TanStack Devtools event-bus events, when that panel is mounted |
 
 The server keeps its own copy, 1,000 entries per session by default (`size`). `list_events`, `get_event`, `count_events` and `diagnose` answer from that copy, so they still work after a reload or a closed tab. A page that loads after a reload starts its log with the Vite event that caused it.
@@ -207,7 +261,7 @@ Known limits:
 - **No time travel.** Effect UI can repaint the page at any past entry because its state is one message log. Query and Router have no equivalent to replay; `diff_query` shows the last change only.
 - **No panel.** This has no UI of its own.
 - **TanStack Form, Table, Store, Pacer and DB have no built-in tools.** They can register their own through `@tanstack/devtools-webmcp`.
-- `diagnose` reports what the log shows. Its loop and duplicate-request rules are thresholds, not proofs.
+- **`diagnose` reads what happened; it does not read your code.** Its rules are tied to documented mistakes, but their thresholds are heuristics, and a quiet result means nothing matched, not that nothing is wrong. TanStack Form and Table have no rules yet.
 
 ## Development
 

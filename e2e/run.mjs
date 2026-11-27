@@ -272,6 +272,26 @@ try {
     )
   })
 
+  await step('a component file with another export defeats Fast Refresh, and diagnose cites the fix', async () => {
+    await page.waitForTimeout(300)
+    before = await mark()
+    writeFileSync(homeFile, `${homeSource}\nexport const helpers = { now: () => Date.now() }\n`)
+    const first = await call('wait_for_update', { after: before })
+    await page.waitForTimeout(300)
+    writeFileSync(homeFile, `${homeSource}\nexport const helpers = { later: () => Date.now() + 1 }\n`)
+    const second = await call('wait_for_update', { after: first.lastEntry, session: first.session })
+    const seen = [...first.entries, ...second.entries].filter((e) => e.source === 'vite')
+    const diagnosis = await call('diagnose', { session: second.session })
+    const finding = diagnosis.findings.find((f) => f.rule === 'vite/fast-refresh-defeated')
+    assert.ok(finding, `no finding; vite said: ${JSON.stringify(seen.map((e) => e.type + ' ' + e.summary))}`)
+    assert.match(finding.evidence[0], /src\/Home\.tsx could not be updated in place: Could not Fast Refresh/)
+    assert.match(finding.fix, /exporting only React components/)
+    assert.match(finding.docs.at, /consistent-components-exports/)
+    await page.waitForTimeout(300)
+    writeFileSync(homeFile, homeSource)
+    await call('wait_for_update', { after: second.lastEntry, session: second.session })
+  })
+
   await step('an uncaught error carries the source line that threw', async () => {
     before = await mark()
     await page.evaluate(() => {

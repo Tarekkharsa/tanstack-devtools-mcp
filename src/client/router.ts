@@ -51,7 +51,11 @@ function match(value: any, depth: number | undefined) {
     ...(value.isFetching ? { isFetching: value.isFetching } : {}),
     ...(isEmpty(value.params) ? {} : { params: bounded(value.params, { depth: 3 }) }),
     ...(isEmpty(value.search) ? {} : { search: bounded(value.search, { depth: 4 }) }),
-    ...(value.error ? { error: brief(value.error) } : {}),
+    ...(isNotFound(value)
+      ? { notFound: true }
+      : value.error
+        ? { error: brief(value.error) }
+        : {}),
     ...(value.loaderData === undefined
       ? {}
       : {
@@ -63,14 +67,111 @@ function match(value: any, depth: number | undefined) {
   }
 }
 
+const ROUTER_SETTINGS = [
+  'defaultPreload',
+  'defaultPreloadDelay',
+  'defaultPreloadStaleTime',
+  'defaultPreloadGcTime',
+  'defaultStaleTime',
+  'defaultGcTime',
+  'defaultPendingMs',
+  'defaultPendingMinMs',
+  'defaultStructuralSharing',
+  'defaultViewTransition',
+  'scrollRestoration',
+  'notFoundMode',
+  'trailingSlash',
+]
+const ROUTER_PARTS = [
+  'notFoundRoute',
+  'defaultErrorComponent',
+  'defaultNotFoundComponent',
+  'defaultPendingComponent',
+  'defaultOnCatch',
+]
+const ROUTE_SETTINGS = ['staleTime', 'gcTime', 'preload', 'preloadStaleTime', 'ssr', 'pendingMs']
+const ROUTE_PARTS = [
+  'loader',
+  'beforeLoad',
+  'validateSearch',
+  'loaderDeps',
+  'component',
+  'errorComponent',
+  'notFoundComponent',
+  'pendingComponent',
+  'head',
+]
+
+function plain(value: unknown): unknown {
+  if (value === null || ['number', 'string', 'boolean'].includes(typeof value)) {
+    return value === Infinity ? 'Infinity' : value
+  }
+  return typeof value
+}
+
+function pick(source: any, values: Array<string>, parts: Array<string>) {
+  const out: Record<string, unknown> = {}
+  for (const name of values) {
+    if (source?.[name] !== undefined) out[name] = plain(source[name])
+  }
+  const has = parts.filter((name) => source?.[name] !== undefined)
+  return { ...out, has }
+}
+
+/** True when a route's loaderDeps hands back the whole search object. */
+function depsAreWholeSearch(match: any): boolean {
+  const deps = match.loaderDeps
+  const search = match.search
+  if (deps === null || typeof deps !== 'object') return false
+  if (search === null || typeof search !== 'object') return false
+  if (Object.keys(search).length < 2) return false
+  try {
+    return JSON.stringify(deps) === JSON.stringify(search)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * How the router and its matched routes are configured, for the rules in
+ * `diagnose`. This goes to the server only.
+ */
+export function routerFacts(router: RouterLike) {
+  const context = router.options?.context
+  return {
+    options: pick(router.options, ROUTER_SETTINGS, ROUTER_PARTS),
+    contextKeys:
+      context !== null && typeof context === 'object' ? Object.keys(context).slice(0, 30) : [],
+    routeCount: Object.keys(router.routesById).length,
+    matches: router.state.matches.map((m) => ({
+      routeId: m.routeId,
+      status: m.status,
+      ...(m.cause ? { cause: m.cause } : {}),
+      ...(m.preload ? { preload: true } : {}),
+      ...(m.error ? { error: brief(m.error) } : {}),
+      hasLoaderData: m.loaderData !== undefined,
+      ...(depsAreWholeSearch(m) ? { loaderDepsIsSearch: true } : {}),
+      ...(m.searchError ? { searchError: brief(m.searchError) } : {}),
+      route: pick(router.routesById[m.routeId]?.options, ROUTE_SETTINGS, ROUTE_PARTS),
+    })),
+  }
+}
+
+function isNotFound(match: any): boolean {
+  return match?.status === 'notFound' || match?.error?.isNotFound === true
+}
+
 export function routerOverview(router: RouterLike) {
   const state = router.state
-  const failed = state.matches.find((m) => m.error)
+  // "Not found" is an answer a route gives, not a failure of it.
+  const missing = state.matches.find((m) => isNotFound(m))
+  const failed = state.matches.find((m) => m.error && !isNotFound(m))
   return {
     status: state.status,
     ...(state.isLoading ? { isLoading: true } : {}),
     href: state.location?.href,
     matches: state.matches.map((m) => m.routeId),
+    ...(missing ? { notFound: missing.routeId } : {}),
     ...(failed ? { error: `${failed.routeId}: ${brief(failed.error)}` } : {}),
   }
 }
@@ -161,16 +262,34 @@ export function recordRouter(router: RouterLike, record: Recorder): () => void {
           : undefined
       if (type === 'onResolved') started = undefined
       const failed =
-        type === 'onResolved' ? router.state.matches.find((m) => m.error) : undefined
+        type === 'onResolved'
+          ? router.state.matches.find((m) => m.error && !isNotFound(m))
+          : undefined
+      const missing =
+        type === 'onResolved' ? router.state.matches.find((m) => isNotFound(m)) : undefined
       record({
         source: 'router',
         type,
         key: event.toLocation?.pathname,
-        summary: `${from} → ${to}${failed ? ` (error in ${failed.routeId}: ${brief(failed.error, 120)})` : ''}`,
+        summary: `${from} → ${to}${failed ? ` (error in ${failed.routeId}: ${brief(failed.error, 120)})` : ''}${missing ? ` (not found, from ${missing.routeId})` : ''}`,
         ...(dur !== undefined ? { dur } : {}),
         ...(type === 'onBeforeNavigate' ? { frames: here() } : {}),
         ...(type === 'onResolved'
-          ? { detail: { matches: router.state.matches.map((m) => m.routeId) } }
+          ? {
+              detail: {
+                matches: router.state.matches.map((m) => m.routeId),
+                // Whether any matched route checks something before loading.
+                guarded: router.state.matches.some(
+                  (m) => typeof router.routesById[m.routeId]?.options?.beforeLoad === 'function',
+                ),
+                // Whether anything would show while a slow loader runs.
+                pendingUi:
+                  router.options?.defaultPendingComponent !== undefined ||
+                  router.state.matches.some(
+                    (m) => router.routesById[m.routeId]?.options?.pendingComponent !== undefined,
+                  ),
+              },
+            }
           : {}),
       })
     }),

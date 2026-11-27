@@ -36,6 +36,10 @@ interface Memory {
   sites: Map<string, Array<Frame>>
   /** Stack captures spent on this query; they stop at a small budget. */
   looks: number
+  /** In the cache before the page connected, as a server render leaves it. */
+  preloaded: boolean
+  /** Fetches started since the page connected. */
+  fetches: number
   hasData: boolean
   current?: unknown
   previous?: unknown
@@ -49,7 +53,7 @@ const MAX_LOOKS = 30
 function memoryOf(query: object): Memory {
   let memory = memories.get(query)
   if (!memory) {
-    memory = { sites: new Map(), looks: 0, hasData: false }
+    memory = { sites: new Map(), looks: 0, preloaded: false, fetches: 0, hasData: false }
     memories.set(query, memory)
   }
   return memory
@@ -132,6 +136,85 @@ function family(query: any): string {
     .slice(0, 2)
     .map((part: unknown) => (typeof part === 'string' ? part : '…'))
     .join('/')
+}
+
+/** A setting as a rule can compare it: a plain value, or what kind of thing it is. */
+function setting(value: unknown): unknown {
+  if (value === undefined) return undefined
+  if (value === null || ['number', 'string', 'boolean'].includes(typeof value)) {
+    return value === Infinity ? 'Infinity' : value
+  }
+  return typeof value
+}
+
+function settings(source: any, names: Array<string>): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const name of names) {
+    const value = setting(source?.[name])
+    if (value !== undefined) out[name] = value
+  }
+  return out
+}
+
+const QUERY_SETTINGS = [
+  'staleTime',
+  'gcTime',
+  'retry',
+  'networkMode',
+  'structuralSharing',
+  'maxPages',
+]
+const OBSERVER_SETTINGS = [
+  'enabled',
+  'staleTime',
+  'refetchInterval',
+  'refetchOnWindowFocus',
+  'refetchOnMount',
+  'refetchOnReconnect',
+  'throwOnError',
+  'suspense',
+]
+
+/**
+ * How the client and each query are configured, for the rules in `diagnose`.
+ * This goes to the server only; it is never returned to an agent as it is.
+ */
+export function queryFacts(client: QueryClientLike & { getDefaultOptions?: () => any }) {
+  const defaults = safe(() => client.getDefaultOptions?.(), undefined)
+  return {
+    defaults: settings(defaults?.queries, [...QUERY_SETTINGS, ...OBSERVER_SETTINGS]),
+    queries: client
+      .getQueryCache()
+      .getAll()
+      .slice(0, 500)
+      .map((query) => {
+        const memory = memoryOf(query)
+        const observers: Array<any> = Array.isArray(query.observers) ? query.observers : []
+        return {
+          queryHash: String(query.queryHash),
+          family: family(query),
+          status: query.state?.status,
+          fetchStatus: query.state?.fetchStatus,
+          stale: safe(() => query.isStale(), false),
+          disabled: safe(() => query.isDisabled(), false),
+          hasData: query.state?.data !== undefined,
+          hasQueryFn: typeof query.options?.queryFn === 'function',
+          failures: query.state?.fetchFailureCount ?? 0,
+          preloaded: memory.preloaded,
+          fetches: memory.fetches,
+          ...(Array.isArray(query.state?.data?.pages) && Array.isArray(query.state?.data?.pageParams)
+            ? { pages: query.state.data.pages.length }
+            : {}),
+          options: settings(query.options, QUERY_SETTINGS),
+          observers: observers.slice(0, 20).map((observer) => ({
+            ...settings(observer?.options, OBSERVER_SETTINGS),
+            ...(typeof observer?.options?.select === 'function' ? { select: true } : {}),
+            ...(observer?.options?.placeholderData !== undefined ? { placeholderData: true } : {}),
+            ...(observer?.options?.initialData !== undefined ? { initialData: true } : {}),
+          })),
+        }
+      }),
+  }
 }
 
 export function queryOverview(client: QueryClientLike) {
@@ -272,7 +355,10 @@ export function recordQuery(
 ): () => void {
   // What the cache already holds, such as queries a server render sent along.
   const existing = client.getQueryCache().getAll()
-  for (const query of existing) noteData(query)
+  for (const query of existing) {
+    noteData(query)
+    memoryOf(query).preloaded = true
+  }
   if (existing.length > 0) {
     const counts = Object.entries(tally(existing.map((q) => String(q.state?.status))))
       .map(([status, count]) => `${count} ${status}`)
@@ -330,6 +416,7 @@ export function recordQuery(
 
     if (type === 'fetch') {
       memory.fetchStarted = now
+      memory.fetches += 1
       record({
         source: 'query',
         type,

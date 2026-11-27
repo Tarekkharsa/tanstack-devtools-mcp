@@ -17,7 +17,7 @@ const instructions = [
   'Inspects a TanStack app running in a browser tab during development: the Query cache, the Router, network calls, console errors and what Vite did with each edit, on one numbered timeline.',
   'Start with overview. After you edit a file, call wait_for_update: it tells you whether the edit compiled and applied, and what the page did next.',
   'After you change the app with a tool, call wait_for_idle with the last entry number you saw.',
-  'diagnose lists what looks wrong. Entries carry `from`, the place in the source they came from.',
+  'diagnose lists what is wrong and what the libraries document as a mistake, each with the documented fix and its source. Entries carry `from`, the place in the source they came from.',
   'list_events, get_event, count_events and diagnose read the server copy of the log, so they still answer after a reload or a closed tab.',
 ].join(' ')
 
@@ -184,7 +184,7 @@ export function createMcpServer(hub: Hub, options: McpOptions = {}): McpServer {
     'diagnose',
     {
       description:
-        'Reads the log and the live page for things that look wrong: build errors, uncaught errors, failed requests, failed queries and routes, queries refetching in a loop, the same request sent several times at once, hydration mismatches, and the slowest queries, requests and navigations. Each finding carries its evidence.',
+        "Reads the log and the live page for things that are wrong, and for mistakes the libraries' own documentation names: build errors, uncaught errors, failed requests, queries and routes; server-rendered data fetched again on load, a prefetch refetched on mount, a failed response cached as success, an invalidation that cannot refetch, request waterfalls, a router or QueryClient recreated mid-session, SSR and Fast Refresh settings that defeat themselves, and the warnings TanStack and Vite print. A finding with `fix` and `docs` restates the recommended way from that source: `docs.at` is a URL, or `package: path` of a skill file shipped in node_modules that you can open. Findings of severity info are judgment calls; read their hint.",
       inputSchema: {
         session,
         after: z
@@ -200,7 +200,7 @@ export function createMcpServer(hub: Hub, options: McpOptions = {}): McpServer {
       guard(async () => {
         const target = hub.resolve(id)
         const live = target.connected
-          ? await hub.call(target, 'page.overview').catch(() => null)
+          ? await hub.call(target, 'page.facts').catch(() => null)
           : null
         const entries =
           after === undefined

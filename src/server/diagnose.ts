@@ -1,19 +1,9 @@
+import { HYDRATION_FIX, KNOWN_MESSAGES, RULES } from './advice.js'
+import { clip, numbers, runRules, where } from './rules.js'
 import type { LogEntry } from '../protocol.js'
+import type { Facts, Finding, KnownMessage, Rule } from './rules.js'
 
-export interface Finding {
-  severity: 'error' | 'warning' | 'info'
-  title: string
-  /** Entry numbers to read with get_event, newest last. */
-  entries?: Array<number>
-  evidence: Array<string>
-  hint?: string
-}
-
-/** The part of the page's own overview that diagnose reads. */
-interface Live {
-  router?: { error?: string } | null
-  query?: { errors?: Array<{ queryHash: string; error: string }> } | null
-}
+export type { Finding } from './rules.js'
 
 const CONSOLE_PROBLEMS = new Set(['error', 'uncaught', 'unhandledrejection'])
 
@@ -47,14 +37,6 @@ function groups(entries: Array<LogEntry>, name: (entry: LogEntry) => string) {
   return [...map.entries()].sort((a, b) => b[1].length - a[1].length)
 }
 
-function clip(text: string, chars = 220): string {
-  return text.length > chars ? `${text.slice(0, chars)}…` : text
-}
-
-function where(entry: LogEntry): string {
-  return entry.at?.[0] ? ` — from ${entry.at[0]}` : ''
-}
-
 /** The most entries of one group inside any window of `windowMs`. */
 function burst(entries: Array<LogEntry>, windowMs: number): Array<LogEntry> {
   let best: Array<LogEntry> = []
@@ -79,8 +61,6 @@ function overlapping(entries: Array<LogEntry>): Array<LogEntry> {
   return best
 }
 
-const numbers = (entries: Array<LogEntry>) => entries.slice(-5).map((entry) => entry.n)
-
 /**
  * Looks through a session's log, and the live page when there is one, for
  * things that are wrong or wasteful. Every rule reads recorded facts; none
@@ -88,8 +68,10 @@ const numbers = (entries: Array<LogEntry>) => entries.slice(-5).map((entry) => e
  */
 export function diagnose(
   entries: Array<LogEntry>,
-  live: Live | null,
+  live: Facts | null,
   dropped = 0,
+  rules: Array<Rule> = RULES,
+  messages: Array<KnownMessage> = KNOWN_MESSAGES,
 ): { ok: boolean; findings: Array<Finding>; checked: number } {
   const findings: Array<Finding> = []
   const by = (source: LogEntry['source'], ...types: Array<string>) =>
@@ -116,7 +98,10 @@ export function diagnose(
       severity: 'error',
       title: 'Hydration mismatch between the server render and the client',
       entries: numbers(hydration),
-      evidence: [clip(hydration.at(-1)!.summary, 400)],
+      evidence: [clip(hydration.at(-1)!.summary, 400) + where(hydration.at(-1)!)],
+      fix: HYDRATION_FIX.fix,
+      docs: HYDRATION_FIX.docs,
+      rule: 'start/hydration-mismatch',
     })
   }
 
@@ -208,8 +193,12 @@ export function diagnose(
   }
 
   // Two copies of one request in flight together were probably meant as one.
+  // GET only: two POSTs to one URL can carry different bodies, which are
+  // never read, so they cannot be called the same request.
   for (const [summary, list] of groups(
-    by('network', 'ok', 'error').filter((e) => e.dur !== undefined),
+    by('network', 'ok', 'error').filter(
+      (e) => e.dur !== undefined && /^(?:GET|HEAD) /.test(e.summary),
+    ),
     (e) => e.summary.replace(/ → .*$/, ''),
   )) {
     const together = overlapping(list)
@@ -242,6 +231,28 @@ export function diagnose(
       evidence: slow.map(({ e, what }) => `${e.dur} ms ${what}: ${clip(e.summary, 160)}`),
     })
   }
+
+  // What the libraries' own docs and skills call a mistake, with their fix.
+  const documented = runRules(rules, messages, { entries, facts: live, by })
+  // A documented warning is also a console line; say it once, the better way.
+  const explained = new Set(documented.flatMap((finding) => finding.entries ?? []))
+  const documentedText = documented.flatMap((finding) => finding.evidence).join('\n')
+  const kept = findings.filter((finding) => {
+    if (finding.title.startsWith('A query fetched')) {
+      // The same loop, already explained with its documented cause.
+      const key = (finding.evidence[0] ?? '').split(' — from ')[0] ?? ''
+      return !(key !== '' && documentedText.includes(key))
+    }
+    if (!finding.title.startsWith('console.error called')) return true
+    const rest = (finding.entries ?? []).filter((n) => !explained.has(n))
+    return rest.length > 0 || (finding.entries ?? []).length === 0
+  })
+  const order = { error: 0, warning: 1, info: 2 }
+  const merged = [...kept, ...documented].sort(
+    (a, b) => order[a.severity] - order[b.severity],
+  )
+  findings.length = 0
+  findings.push(...merged)
 
   if (dropped > 0) {
     findings.push({

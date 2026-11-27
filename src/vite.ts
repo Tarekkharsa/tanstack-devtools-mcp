@@ -173,8 +173,26 @@ function recordVite(server: ViteDevServer, hub: Hub): void {
   tap(server.environments?.client?.hot)
   tap(server.ws)
 
-  // Errors Vite only logs, such as a failed server render.
   const logger = server.config.logger
+
+  // A module that could not be hot-updated in place says why in Vite's log.
+  const logInfo = logger.info.bind(logger)
+  logger.info = (message, options) => {
+    const said = stripAnsi(String(message))
+    const match = /hmr invalidate (\S+)\s*(.*)$/.exec(said)
+    if (match) {
+      const path = match[1]!.replace(/^\//, '')
+      hub.recordServer({
+        source: 'vite',
+        type: 'invalidate',
+        key: path,
+        summary: clip(`${path} could not be updated in place${match[2] ? `: ${match[2]}` : ''}`, 400),
+      })
+    }
+    logInfo(message, options)
+  }
+
+  // Errors Vite only logs, such as a failed server render.
   const logError = logger.error.bind(logger)
   logger.error = (message, options) => {
     const said = stripAnsi(String(message))
@@ -283,7 +301,8 @@ export function tanstackDevtoolsMcp(
       // hot updates carry on as if the plugin were not there.
       const url = JSON.stringify(base + ENTRY_URL)
       return {
-        code: `${code}\n;(() => { const url = ${url}; import(/* @vite-ignore */ url).catch(() => {}) })()\n`,
+        // Workers load Vite's client too; only a document is a page.
+        code: `${code}\n;(() => { if (typeof document === 'undefined') return; const url = ${url}; import(/* @vite-ignore */ url).catch(() => {}) })()\n`,
         map: null,
       }
     },

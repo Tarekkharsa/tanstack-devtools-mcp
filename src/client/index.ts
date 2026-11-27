@@ -5,9 +5,15 @@ import {
   recordConsole,
   recordNetwork,
 } from './capture.js'
-import { queryHandlers, queryOverview, recordQuery } from './query.js'
+import {
+  queryFacts,
+  queryHandlers,
+  queryOverview,
+  recordQuery,
+} from './query.js'
 import {
   recordRouter,
+  routerFacts,
   routerHandlers,
   routerIdle,
   routerOverview,
@@ -100,6 +106,8 @@ class Bridge {
   #retryMs = 500
   #flushTimer: ReturnType<typeof setTimeout> | undefined
   #sentMeta = ''
+  /** Milliseconds between the page starting to load and this bridge existing. */
+  #lateBy = typeof performance === 'undefined' ? 0 : Math.round(performance.now())
 
   constructor() {
     captureTools(this.tools, () => this.#scheduleFlush())
@@ -196,6 +204,13 @@ class Bridge {
 
   #attachQuery(client: QueryClientLike, pinned: boolean): void {
     if (this.#queryClient === client) return
+    if (this.#queryClient) {
+      this.record({
+        source: 'query',
+        type: 'replaced',
+        summary: 'the app created a new QueryClient',
+      })
+    }
     this.#stops.get('query')?.()
     this.#queryClient = client
     this.#pinned.query = pinned
@@ -205,6 +220,15 @@ class Bridge {
 
   #attachRouter(router: RouterLike, pinned: boolean): void {
     if (this.#router === router) return
+    if (this.#router) {
+      // The same page load built a second router. The rules decide whether
+      // a hot update explains it.
+      this.record({
+        source: 'router',
+        type: 'replaced',
+        summary: 'the app created a new router instance',
+      })
+    }
     this.#stops.get('router')?.()
     this.#router = router
     this.#pinned.router = pinned
@@ -223,7 +247,7 @@ class Bridge {
     }
     // The usual Router and Query setup keeps the client in the router context.
     const inContext = this.#router?.options?.context?.queryClient
-    if (!this.#pinned.query && !this.#queryClient && isQueryClient(inContext)) {
+    if (!this.#pinned.query && isQueryClient(inContext) && !isQueryClient(globals.__TANSTACK_QUERY_CLIENT__)) {
       this.#attachQuery(inContext, false)
     }
   }
@@ -234,6 +258,13 @@ class Bridge {
       ...(this.#router ? routerHandlers(this.#router) : {}),
       'page.wait': (args) => this.#wait(args),
       'page.overview': () => this.#overview(),
+      'page.facts': () => ({
+        ...this.#overview(),
+        queryFacts: this.#queryClient ? queryFacts(this.#queryClient) : null,
+        routerFacts: this.#router ? routerFacts(this.#router) : null,
+        connectedAfterLoad: this.#lateBy,
+        modules: loadedModules(),
+      }),
       'tool.call': (args) => this.#callTool(args),
     }
     this.#scheduleFlush()
@@ -408,6 +439,19 @@ class Bridge {
   }
 }
 
+/** Other routers the page has loaded next to TanStack Router. */
+function loadedModules(): Array<string> {
+  if (typeof performance === 'undefined' || !performance.getEntriesByType) return []
+  const found = new Set<string>()
+  for (const entry of performance.getEntriesByType('resource')) {
+    const match = /\/(react-router-dom|react-router)(?:\.js|\/)/.exec(entry.name)
+    if (match && !entry.name.includes('@tanstack') && !entry.name.includes('tanstack_')) {
+      found.add(match[1]!)
+    }
+  }
+  return [...found]
+}
+
 function missing(method: string): string {
   if (method.startsWith('query.') || method.startsWith('mutation.')) {
     return 'This page has no QueryClient connected. Pass it to connect({ queryClient }) or set window.__TANSTACK_QUERY_CLIENT__.'
@@ -433,6 +477,8 @@ function bridge(): Bridge {
  * later calls add what they pass. Returns a function that disconnects.
  */
 export function connect(options: ConnectOptions = {}): () => void {
+  // A worker has a global scope and can open a socket, but it is not a page.
+  if (typeof document === 'undefined' && !options.createSocket) return () => {}
   return bridge().connect(options)
 }
 

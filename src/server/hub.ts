@@ -244,7 +244,10 @@ export class Hub {
         (best, s) => (!best || s.connectedAt >= best.connectedAt ? s : best),
         undefined,
       )
-    const session = newest(all.filter((s) => s.connected)) ?? newest(all)
+    const open = all.filter((s) => s.connected)
+    // A page with something to inspect comes before one with nothing.
+    const useful = (s: Session) => s.info.has.router || s.info.has.query || s.info.tools.length > 0
+    const session = newest(open.filter(useful)) ?? newest(open) ?? newest(all)
     if (!session) {
       throw new Error(
         'No page has connected yet. Open the app in a browser with the dev server running.',

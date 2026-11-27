@@ -39,6 +39,21 @@ describe('Hub', () => {
     expect(hub.sessions.get('b')!.entries).toEqual([])
   })
 
+  it('defaults to the newest open page that has something to inspect', async () => {
+    const hub = new Hub()
+    const app = page(hub, 'app')
+    app.send({ kind: 'meta', patch: { has: { query: true, router: true } } })
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    // Connected later, with no router or client: an embedded frame, say.
+    const bare = page(hub, 'bare')
+    expect(hub.resolve().info.id).toBe('app')
+    app.close()
+    expect(hub.resolve().info.id).toBe('bare')
+    bare.close()
+    expect(hub.resolve().info.id).toBe('bare')
+    expect(hub.resolve('app').info.id).toBe('app')
+  })
+
   it('greets a new page with what the dev server just did', () => {
     const hub = new Hub()
     hub.recordServer({ source: 'vite', type: 'full-reload', summary: 'full reload' })
@@ -190,6 +205,13 @@ describe('diagnose', () => {
     expect(diagnose(broken, null).findings[0]!.title).toMatch(/build error/)
     const fixed = [...broken, entry({ source: 'vite', type: 'hmr-update', summary: 'hot update: src/a.tsx' })]
     expect(diagnose(fixed, null).ok).toBe(true)
+  })
+
+  it('does not call two POSTs to one URL the same request', () => {
+    const posts = Array.from({ length: 3 }, () =>
+      entry({ source: 'network', type: 'ok', key: '/api/rates', summary: 'POST /api/rates → 200', dur: 500 }),
+    )
+    expect(diagnose(posts, null).findings).toEqual([])
   })
 
   it('does not flag the same request sent again after the first finished', () => {
