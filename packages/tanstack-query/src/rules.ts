@@ -156,6 +156,7 @@ export const QUERY_RULES: Array<Rule> = [
         findings.push({
           severity: 'warning' as const,
           title: `A query fetched ${run.length} times within 10 s`,
+          subject: key,
           entries: numbers(run),
           evidence: [clip(key, 160) + where(run.at(-1)!)],
           hint: 'Common causes: a query key that changes on every render, an effect that invalidates on each update, or staleTime 0 with many mounts.',
@@ -289,6 +290,7 @@ export const QUERY_RULES: Array<Rule> = [
         findings.push({
           severity: 'warning' as const,
           title: `A query with no staleTime fetched ${recent.length} times in a minute`,
+          subject: key,
           entries: numbers(recent),
           evidence: [clip(key, 140) + where(recent.at(-1)!)],
         })

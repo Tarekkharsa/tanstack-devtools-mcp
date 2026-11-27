@@ -12,6 +12,7 @@ export default defineConfig({
       "@loopsight/core/page": here("./packages/core/src/page/index.ts"),
       "@loopsight/core/server": here("./packages/core/src/server/index.ts"),
       "@loopsight/core/protocol": here("./packages/core/src/protocol.ts"),
+      "@loopsight/vite/page": here("./packages/vite/src/page.ts"),
       "@loopsight/vite": here("./packages/vite/src/index.ts"),
       "loopsight/vite": here("./packages/loopsight/src/vite.ts"),
       "loopsight/client": here("./packages/loopsight/src/client.ts"),

@@ -1,6 +1,6 @@
 import { BRIDGE_PATH, DEFAULT_PORT, GLOBAL_KEY, PROTOCOL } from '../protocol.js'
 import { captureTools, recordConsole, recordNetwork } from './capture.js'
-import { bounded } from './serialize.js'
+import { bounded, brief } from './serialize.js'
 import { ignoreFrames } from './stack.js'
 import type {
   PageEntry,
@@ -77,6 +77,8 @@ interface Slot {
   /** An instance the app handed over is never replaced by a found one. */
   pinned: boolean
   attached: AttachedSource | undefined
+  /** Why `attach` threw, when it did. Kept so it is said, and not retried. */
+  failed?: string
 }
 
 class Bridge {
@@ -151,6 +153,14 @@ class Bridge {
     }
 
     for (const source of options.sources ?? []) this.#register(source)
+    // A source that needs no instance starts at once, and starts again when
+    // the page reconnects after a disconnect.
+    for (const slot of this.#slots.values()) {
+      if (!slot.source.instance && !slot.attached && slot.failed === undefined) {
+        slot.attached = this.#start(slot, undefined)
+      }
+    }
+    this.#rebuild()
     for (const [key, instance] of Object.entries(options.instances ?? {})) {
       const slot = this.#slots.get(key)
       if (slot && instance !== undefined && slot.source.instance?.accepts(instance)) {
@@ -189,6 +199,7 @@ class Bridge {
       slot.attached = undefined
       slot.instance = undefined
       slot.pinned = false
+      delete slot.failed
     }
     for (const stop of this.#stops.values()) stop()
     this.#stops.clear()
@@ -203,10 +214,25 @@ class Bridge {
     const slot: Slot = { source, instance: undefined, pinned: false, attached: undefined }
     this.#slots.set(source.key, slot)
     for (const name of source.instance?.globals ?? []) this.#watch(name)
-    // A source that needs no instance starts at once.
-    if (!source.instance) {
-      slot.attached = source.attach(undefined, this.#context)
-      this.#rebuild()
+  }
+
+  /**
+   * Calls a source's `attach`. A source that throws is left off and the
+   * reason recorded: it must not take the page's other sources down with it.
+   */
+  #start(slot: Slot, instance: unknown): AttachedSource | undefined {
+    delete slot.failed
+    try {
+      return slot.source.attach(instance, this.#context)
+    } catch (error) {
+      slot.failed = error instanceof Error ? error.message : String(error)
+      this.record({
+        source: slot.source.key,
+        type: 'attach-failed',
+        summary: `the ${slot.source.key} source could not start: ${brief(slot.failed, 200)}`,
+        problem: true,
+      })
+      return undefined
     }
   }
 
@@ -253,7 +279,7 @@ class Bridge {
     }
     slot.instance = instance
     slot.pinned = pinned
-    slot.attached = source.attach(instance, this.#context)
+    slot.attached = this.#start(slot, instance)
     this.#rebuild()
   }
 
@@ -263,16 +289,25 @@ class Bridge {
       global: globalThis as Record<string, any>,
       instanceOf: this.#context.instanceOf,
     }
-    for (const slot of this.#slots.values()) {
-      const find = slot.source.instance?.find
-      if (!find || slot.pinned) continue
-      let found: unknown
-      try {
-        found = find(env)
-      } catch {
-        found = undefined
+    // One source may find its instance through another's (a client kept in
+    // a router's context), whatever order they were listed in. So look again
+    // for as long as a pass attached something.
+    for (let pass = 0; pass < this.#slots.size; pass++) {
+      let attached = false
+      for (const slot of this.#slots.values()) {
+        const find = slot.source.instance?.find
+        if (!find || slot.pinned) continue
+        let found: unknown
+        try {
+          found = find(env)
+        } catch {
+          found = undefined
+        }
+        if (found === undefined || found === slot.instance) continue
+        this.#attach(slot, found, false)
+        attached = true
       }
-      if (found !== undefined) this.#attach(slot, found, false)
+      if (!attached) break
     }
   }
 
@@ -425,9 +460,9 @@ class Bridge {
       return
     }
     if (message.kind !== 'call') return
-    this.#discover()
-    const handler = this.#handlers[message.method]
     try {
+      this.#discover()
+      const handler = this.#handlers[message.method]
       if (!handler) throw new Error(this.#missing(message.method))
       const value = await handler((message.args ?? {}) as Record<string, any>)
       this.#send({ kind: 'result', id: message.id, ok: true, value })
@@ -447,9 +482,11 @@ class Bridge {
     for (const slot of this.#slots.values()) {
       const owns =
         slot.source.methods?.includes(namespace) ?? slot.source.key === namespace
-      if (owns && !slot.attached && slot.source.instance) {
-        return slot.source.instance.missing
+      if (!owns || slot.attached) continue
+      if (slot.failed !== undefined) {
+        return `The ${slot.source.key} source could not start on this page: ${slot.failed}`
       }
+      if (slot.source.instance) return slot.source.instance.missing
     }
     return `Unknown method ${method}`
   }

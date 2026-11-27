@@ -23,6 +23,12 @@ export interface Finding {
   docs?: Reference
   /** The id of the rule that produced it. */
   rule?: string
+  /**
+   * What it is about, for a rule that reports one finding per thing: a query
+   * key, a file. It pairs a finding with the plainer one it replaces (see
+   * `supersedes`) and is not sent to the agent.
+   */
+  subject?: string
 }
 
 /**
@@ -61,8 +67,9 @@ export interface Rule {
   fix?: string
   docs?: Reference
   /**
-   * Rules whose findings say the same thing less well. They are dropped when
-   * this rule reports something.
+   * Rules whose findings say the same thing less well. One of theirs is
+   * dropped when this rule reports a finding with the same `subject`, or
+   * when either of the two has none.
    */
   supersedes?: ReadonlyArray<string>
   check: (context: RuleContext) => Array<Omit<Finding, 'fix' | 'docs' | 'rule'>>
@@ -127,7 +134,7 @@ export function runRules(
   context: RuleContext,
 ): Array<Finding> {
   const findings: Array<Finding> = []
-  const superseded = new Set<string>()
+  const replaced: Array<{ rule: string; subject: string | undefined }> = []
   for (const rule of rules) {
     let found: ReturnType<Rule['check']>
     try {
@@ -136,8 +143,12 @@ export function runRules(
       // A rule that trips over an unexpected shape must not hide the others.
       continue
     }
-    if (found.length > 0) for (const id of rule.supersedes ?? []) superseded.add(id)
     for (const finding of found.slice(0, 3)) {
+      // Only what is reported replaces anything: a finding cut off here must
+      // not hide the plainer one about the same thing.
+      for (const id of rule.supersedes ?? []) {
+        replaced.push({ rule: id, subject: finding.subject })
+      }
       findings.push({
         ...finding,
         ...(rule.fix !== undefined ? { fix: rule.fix } : {}),
@@ -163,5 +174,16 @@ export function runRules(
       rule: message.id,
     })
   }
-  return findings.filter((finding) => !superseded.has(finding.rule ?? ''))
+  return findings
+    .filter(
+      (finding) =>
+        !replaced.some(
+          (by) =>
+            by.rule === finding.rule &&
+            (by.subject === undefined ||
+              finding.subject === undefined ||
+              by.subject === finding.subject),
+        ),
+    )
+    .map(({ subject: _subject, ...finding }) => finding)
 }

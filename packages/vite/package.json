@@ -8,7 +8,7 @@
     "dist"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=20.19"
   },
   "repository": {
     "type": "git",
@@ -19,6 +19,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./page": {
+      "types": "./dist/page.d.ts",
+      "default": "./dist/page.js"
     },
     "./package.json": "./package.json"
   },

@@ -11,6 +11,9 @@
       "@loopsight/core/protocol": [
         "./packages/core/src/protocol.ts"
       ],
+      "@loopsight/vite/page": [
+        "./packages/vite/src/page.ts"
+      ],
       "@loopsight/vite": [
         "./packages/vite/src/index.ts"
       ],

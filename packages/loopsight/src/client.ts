@@ -3,6 +3,7 @@ import bus from '@loopsight/tanstack-devtools/page'
 import query from '@loopsight/tanstack-query/page'
 import router from '@loopsight/tanstack-router/page'
 import start from '@loopsight/tanstack-start/page'
+import { VITE_FRAMES, VITE_REQUESTS } from '@loopsight/vite/page'
 import type { ConnectOptions as CoreOptions } from '@loopsight/core/page'
 import type { QueryClientLike } from '@loopsight/tanstack-query/page'
 import type { RouterLike } from '@loopsight/tanstack-router/page'
@@ -30,6 +31,10 @@ export interface ConnectOptions extends CoreOptions {
 export function connect(options: ConnectOptions = {}): () => void {
   const { queryClient, router: routerInstance, ...rest } = options
   return connectPage({
+    // This preset is for apps Vite serves. The plugin's own entry passes
+    // these too; here they cover an app that connects by itself.
+    ignoreFrames: VITE_FRAMES,
+    ignoreRequests: VITE_REQUESTS,
     ...rest,
     sources: [router, query, start, bus, ...(rest.sources ?? [])],
     instances: {

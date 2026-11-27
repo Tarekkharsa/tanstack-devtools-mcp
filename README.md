@@ -96,6 +96,8 @@ That is the whole setup. The plugin runs with `vite dev` only, and:
 - finds the router on `window.__TSR_ROUTER__`, where TanStack Router puts it
 - finds the `QueryClient` in the router context (`context.queryClient`) or on `window.__TANSTACK_QUERY_CLIENT__`
 
+The dev server prints which sources are on, next to the MCP address. A library counts as installed when it is in a `node_modules` folder at or above the app, including pnpm's shared one. If yours is somewhere else and its source is missing, pass `loopsight({ detect: false })` to turn on every source listed.
+
 If your `QueryClient` is in neither place, hand it over:
 
 ```ts

@@ -1,8 +1,8 @@
 import { startServer as startCore } from '@loopsight/core/server'
-import { tanstack } from './preset.js'
+import { serverSources } from './preset.js'
 import type { RunningServer, ServerOptions } from '@loopsight/core/server'
 
-export { tanstack } from './preset.js'
+export { serverSources, tanstack } from './preset.js'
 export type { RunningServer, ServerOptions } from '@loopsight/core/server'
 
 /**
@@ -13,6 +13,6 @@ export type { RunningServer, ServerOptions } from '@loopsight/core/server'
 export function startServer(options: ServerOptions = {}): Promise<RunningServer> {
   return startCore({
     ...options,
-    sources: options.sources ?? tanstack().map((source) => source.server),
+    sources: options.sources ?? serverSources(),
   })
 }

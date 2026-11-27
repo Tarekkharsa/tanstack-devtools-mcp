@@ -640,4 +640,26 @@ describe('messages the libraries print', () => {
       'A query fetched 5 times within 10 s',
     ])
   })
+
+  it('keeps the plain loop finding for a query the documented one is not about', () => {
+    const { entries, add } = log()
+    for (let index = 0; index < 5; index++) {
+      add(1000 + index * 1000, 'query', 'fetch', '["rates"] refetching', { key: '["rates"]' })
+      // Fresh for a minute, so staleTime does not explain why it keeps fetching.
+      add(1500 + index * 1000, 'query', 'fetch', '["user",1] refetching', { key: '["user",1]' })
+    }
+    const facts = {
+      queryFacts: queryFacts([
+        query('["rates"]'),
+        query('["user",1]', { observers: [{ staleTime: 60_000 }] }),
+      ]),
+    }
+    const findings = diagnose(entries, facts).findings
+    expect(findings.map((finding) => [finding.rule, finding.evidence[0]])).toEqual([
+      ['query/fetch-loop', '["user",1]'],
+      ['query/refetching-stale-at-once', '["rates"]'],
+    ])
+    // What pairs the two is used here and not sent to the agent.
+    for (const finding of findings) expect(finding).not.toHaveProperty('subject')
+  })
 })

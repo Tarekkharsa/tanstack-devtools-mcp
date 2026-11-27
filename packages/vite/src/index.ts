@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { dirname, join, posix, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { TraceMap, originalPositionFor } from '@jridgewell/trace-mapping'
@@ -11,6 +12,7 @@ import {
   registerOnAgentHost,
   startServer,
 } from '@loopsight/core/server'
+import { VITE_FRAMES, VITE_REQUESTS } from './page.js'
 import { viteServerSource } from './rules.js'
 import type { Plugin, ViteDevServer } from 'vite'
 import type {
@@ -21,6 +23,7 @@ import type {
   SourceDescriptor,
 } from '@loopsight/core/server'
 
+export { VITE_FRAMES, VITE_REQUESTS } from './page.js'
 export { viteServerSource } from './rules.js'
 
 export interface LoopsightViteOptions
@@ -30,6 +33,12 @@ export interface LoopsightViteOptions
    * (`detect`) is left out when the app has none of them installed.
    */
   sources?: ReadonlyArray<SourceDescriptor>
+  /**
+   * Leave out the sources whose library is not installed. Default true. Set
+   * it to false to use every source listed, when the libraries are somewhere
+   * this plugin cannot see, such as a package manager with no `node_modules`.
+   */
+  detect?: boolean
   /**
    * Connects every page the dev server serves, with no code in the app.
    * Turn it off to call `connect` yourself. Default true.
@@ -55,15 +64,26 @@ const SOURCE = `${NAME}-source:`
 // Vite keeps it at dist/client/client.mjs, Vite+ at dist/vite/client/client.mjs.
 const VITE_CLIENT = /[\\/]client[\\/]client\.mjs$/
 
-/** Vite's own modules and requests, which are not the app's. */
-const VITE_FRAMES = ['/@id/', '/@vite/', '/@fs/', '/\\.vite/']
-const VITE_REQUESTS = ['^/(?:@vite|@id|@fs|@react-refresh|__vite|node_modules/\\.vite)']
-
-/** Whether a package is installed where the app can import it. */
+/**
+ * Whether a package is installed for the app. It may be a dependency of a
+ * workspace package the app imports and not of the app itself, so the
+ * folders a package manager keeps such packages in are looked at too.
+ */
 function installed(root: string, name: string): boolean {
   for (let dir = root; ; dir = dirname(dir)) {
-    if (existsSync(join(dir, 'node_modules', name, 'package.json'))) return true
-    if (dirname(dir) === dir) return false
+    const modules = join(dir, 'node_modules')
+    if (existsSync(join(modules, name, 'package.json'))) return true
+    // pnpm links every package of the workspace here, direct or not.
+    if (existsSync(join(modules, '.pnpm', 'node_modules', name, 'package.json'))) return true
+    if (dirname(dir) === dir) break
+  }
+  try {
+    // Node's own resolution, which Plug'n'Play installs replace.
+    createRequire(join(root, 'package.json')).resolve(`${name}/package.json`)
+    return true
+  } catch (error) {
+    // Found, but it does not let its package.json be imported.
+    return (error as { code?: string }).code === 'ERR_PACKAGE_PATH_NOT_EXPORTED'
   }
 }
 
@@ -304,7 +324,7 @@ function servedHost(server: ViteDevServer, host: string | undefined): boolean {
  * render the document on the server.
  */
 export function loopsightVite(options: LoopsightViteOptions = {}): Plugin {
-  const { inject = true, standalone = true, sources: wanted = [], ...rest } = options
+  const { inject = true, standalone = true, detect = true, sources: wanted = [], ...rest } = options
   let running: RunningServer | undefined
   let base = '/'
   /** A JavaScript expression for the bridge URL, once there is a bridge. */
@@ -336,6 +356,7 @@ export function loopsightVite(options: LoopsightViteOptions = {}): Plugin {
       base = config.base
       active = wanted.filter(
         (source) =>
+          !detect ||
           source.detect === undefined ||
           source.detect.some((name) => installed(config.root, name)),
       )
@@ -368,6 +389,7 @@ export function loopsightVite(options: LoopsightViteOptions = {}): Plugin {
         server.printUrls = () => {
           print()
           logger.info(`  ➜  ${NAME} MCP: ${mcpUrl}`)
+          logger.info(`  ➜  ${NAME} sources: ${active.map((source) => source.key).join(', ') || 'none'}`)
         }
       } else {
         // No port of our own: the page reaches the hub through the dev

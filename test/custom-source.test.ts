@@ -1,10 +1,11 @@
 // @vitest-environment happy-dom
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
-import { connect } from '@loopsight/core/page'
+import { appFrames, connect } from '@loopsight/core/page'
 import { Hub, createMcpServer } from '@loopsight/core/server'
 import { afterEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
+import { connect as presetConnect } from 'loopsight/client'
 import type { PageSource, SocketLike } from '@loopsight/core/page'
 import type { ServerSource } from '@loopsight/core/server'
 
@@ -118,9 +119,8 @@ afterEach(async () => {
   delete (globalThis as any).__CART_STORE__
 })
 
-async function setup(actions: boolean) {
-  const hub = new Hub()
-  const createSocket = (): SocketLike => {
+function link(hub: Hub) {
+  return (): SocketLike => {
     const toHub: Array<(text: string) => void> = []
     const closed: Array<() => void> = []
     const socket: SocketLike = {
@@ -138,10 +138,24 @@ async function setup(actions: boolean) {
     queueMicrotask(() => socket.onopen?.())
     return socket
   }
-  cleanups.push(
-    connect({ sources: [cartPage], console: false, network: false, url: 'ws://test/bridge', createSocket }),
-  )
-  const server = createMcpServer(hub, { actions, sources: [cartServer] })
+}
+
+async function setup(
+  actions: boolean,
+  pages: Array<PageSource> = [cartPage],
+  servers: Array<ServerSource> = [cartServer],
+) {
+  const hub = new Hub()
+  const options = {
+    sources: pages,
+    console: false,
+    network: false,
+    url: 'ws://test/bridge',
+    createSocket: link(hub),
+  }
+  const disconnect = connect(options)
+  cleanups.push(disconnect)
+  const server = createMcpServer(hub, { actions, sources: servers })
   const client = new Client({ name: 'test', version: '0.0.0' })
   const [a, b] = InMemoryTransport.createLinkedPair()
   await Promise.all([server.connect(a), client.connect(b)])
@@ -155,7 +169,7 @@ async function setup(actions: boolean) {
     return JSON.parse(result.content[0]!.text)
   }
   await expect.poll(() => hub.sessions.size).toBe(1)
-  return { client, call }
+  return { hub, client, call, disconnect, reconnect: () => cleanups.push(connect(options)) }
 }
 
 describe('a source from outside this repository', () => {
@@ -210,5 +224,97 @@ describe('a source from outside this repository', () => {
     const names = (await client.listTools()).tools.map((tool) => tool.name)
     expect(names).toContain('get_cart')
     expect(names).not.toContain('set_cart_item')
+  })
+})
+
+describe('the page bridge, whatever the sources', () => {
+  it('starts a listen-only source again when the page reconnects', async () => {
+    let listening = 0
+    const listener: PageSource = {
+      key: 'clicks',
+      attach: () => {
+        listening += 1
+        return { stop: () => (listening -= 1) }
+      },
+    }
+    const { disconnect, reconnect } = await setup(false, [listener], [])
+    expect(listening).toBe(1)
+    disconnect()
+    expect(listening).toBe(0)
+    reconnect()
+    expect(listening).toBe(1)
+  })
+
+  it('finds an instance kept inside another source\'s, in either listing order', async () => {
+    const shell = { settings: { subscribe: () => () => {}, getState: () => ({ items: {} }), set: () => {} } }
+    const shellPage: PageSource<typeof shell> = {
+      key: 'shell',
+      instance: {
+        label: 'shell',
+        accepts: (value): value is typeof shell => typeof value === 'object' && value !== null,
+        find: ({ global }) => global.__SHELL__,
+        missing: 'No shell.',
+      },
+      attach: () => ({}),
+    }
+    // Listed first, though it can only find its store once the shell is known.
+    const inner: PageSource<Store> = {
+      ...cartPage,
+      instance: {
+        ...cartPage.instance!,
+        globals: [],
+        find: ({ instanceOf }) => (instanceOf('shell') as typeof shell | undefined)?.settings,
+      },
+    }
+    ;(globalThis as any).__SHELL__ = shell
+    cleanups.push(() => delete (globalThis as any).__SHELL__)
+    const { call } = await setup(false, [inner, shellPage], [cartServer])
+    // No waiting for the next timed check: both are there on the first answer.
+    expect((await call('list_sessions')).sessions[0].has).toEqual({ cart: true, shell: true })
+  })
+
+  it('keeps the other sources working when one throws as it starts', async () => {
+    const broken: PageSource<Store> = {
+      ...cartPage,
+      key: 'broken',
+      methods: ['broken'],
+      instance: { ...cartPage.instance!, globals: [], find: ({ global }) => global.__CART_STORE__ },
+      attach: () => {
+        throw new Error('unexpected store shape')
+      },
+    }
+    const brokenServer: ServerSource = {
+      key: 'broken',
+      title: 'Broken',
+      tools: [{ name: 'get_broken', description: 'x', input: {}, run: (_a, { call }) => call('broken.state') }],
+    }
+    ;(globalThis as any).__CART_STORE__ = createStore()
+    const { call } = await setup(false, [broken, cartPage], [brokenServer, cartServer])
+
+    expect(await call('get_cart')).toEqual({ items: {} })
+    expect((await call('list_sessions')).sessions[0].has).toEqual({ broken: false, cart: true })
+    // The tool answers with the reason instead of timing out, and the
+    // failure is on the timeline once, not once per check.
+    await expect(call('get_broken')).rejects.toThrow(
+      'The broken source could not start on this page: unexpected store shape',
+    )
+    const failures = (await call('list_events', { problems: true })).entries
+    expect(failures.map((entry: any) => `${entry.source}/${entry.type}`)).toEqual(['broken/attach-failed'])
+  })
+
+  it('leaves Vite\'s own frames out for an app that connects through the preset by itself', () => {
+    const origin = location.origin === 'null' ? 'http://localhost:5173' : location.origin
+    const stack = `Error
+    at refresh (${origin}/@react-refresh:10:1)
+    at hot (${origin}/@vite/client:900:3)
+    at dep (${origin}/node_modules/.vite/deps/react.js:40:2)
+    at App (${origin}/src/App.tsx:7:9)`
+    // Before the preset connects, the core alone knows nothing of Vite.
+    expect(appFrames(stack)).toHaveLength(3)
+    const hub = new Hub()
+    cleanups.push(
+      presetConnect({ console: false, network: false, url: 'ws://test/bridge', createSocket: link(hub) }),
+    )
+    expect(appFrames(stack).map((frame) => frame.url)).toEqual([`${origin}/src/App.tsx`])
   })
 })

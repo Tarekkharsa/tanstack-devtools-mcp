@@ -2,9 +2,10 @@ import { createServer as createHttpServer } from 'node:http'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createServer } from 'vite'
 import { WebSocket } from 'ws'
+import { loopsightVite } from '@loopsight/vite'
 import { loopsight } from 'loopsight/vite'
 import type { AddressInfo } from 'node:net'
-import type { AgentHostLike } from '@loopsight/core/server'
+import type { AgentHostLike, SourceDescriptor } from '@loopsight/core/server'
 
 type Registered = Parameters<AgentHostLike['registerTool']>[0]
 
@@ -115,22 +116,35 @@ describe('standalone: false', () => {
     expect(await vite.pluginContainer.resolveId('loopsight-source:0', '/src/main.tsx')).toBeNull()
   })
 
-  it('leaves out a source whose library the app does not have', async () => {
-    const plugin = loopsight({ standalone: false })
-    const vite = await createServer({
-      configFile: false,
-      // Nothing is installed above the filesystem root.
-      root: '/',
-      logLevel: 'silent',
-      appType: 'custom',
-      optimizeDeps: { noDiscovery: true, include: [] },
-      server: { middlewareMode: true, ws: false },
-      plugins: [plugin],
+  it('leaves out a source whose library the app does not have, unless told not to look', async () => {
+    const source = (key: string, tool: string, detect: Array<string>): SourceDescriptor => ({
+      key,
+      detect,
+      server: {
+        key,
+        title: key,
+        tools: [{ name: tool, description: tool, input: {}, run: () => ({}) }],
+      },
     })
-    closers.push(() => vite.close())
-    const tools = await asDevtools(plugin)
-    expect([...tools.keys()]).not.toContain('loopsight:list_queries')
-    expect([...tools.keys()]).toContain('loopsight:list_events')
-    expect(tools.size).toBe(10)
+    const sources = [
+      source('here', 'get_here', ['no-such-package-a', 'vite']),
+      source('absent', 'get_absent', ['no-such-package-a', '@no-such-scope/package-b']),
+    ]
+    const names = async (detect: boolean) => {
+      const plugin = loopsightVite({ standalone: false, sources, detect })
+      const vite = await createServer({
+        configFile: false,
+        root: import.meta.dirname,
+        logLevel: 'silent',
+        appType: 'custom',
+        optimizeDeps: { noDiscovery: true, include: [] },
+        server: { middlewareMode: true, ws: false },
+        plugins: [plugin],
+      })
+      closers.push(() => vite.close())
+      return [...(await asDevtools(plugin)).keys()].slice(10)
+    }
+    expect(await names(true)).toEqual(['loopsight:get_here'])
+    expect(await names(false)).toEqual(['loopsight:get_here', 'loopsight:get_absent'])
   })
 })
