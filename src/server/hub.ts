@@ -1,5 +1,7 @@
 import type {
+  Frame,
   LogEntry,
+  PageEntry,
   PageMessage,
   ServerMessage,
   SessionInfo,
@@ -20,6 +22,10 @@ export interface Session {
   entries: Array<LogEntry>
   /** Entries dropped from the front of `entries` to stay within `size`. */
   dropped: number
+  /** The number the next entry gets. */
+  nextN: number
+  /** The highest page-side sequence number received. */
+  pageSeq: number
   connection: Connection | undefined
 }
 
@@ -30,7 +36,17 @@ export interface HubOptions {
   sessions?: number
   /** Milliseconds a page has to answer a call. Default 15000. */
   callTimeoutMs?: number
+  /**
+   * Turns a browser stack frame into a place in the source, such as
+   * `loadPost src/routes/post.tsx:12:5`. The Vite plugin supplies one that
+   * reads source maps. Without it, frames keep the served file's positions.
+   */
+  resolveFrame?: (frame: Frame) => string | undefined | Promise<string | undefined>
 }
+
+/** How long a server-side entry stays around to greet a page that reloads. */
+const GREETING_MS = 5000
+const RECENT = 50
 
 interface Pending {
   sessionId: string
@@ -49,12 +65,16 @@ export class Hub {
   readonly #keep: number
   readonly #callTimeoutMs: number
   readonly #pending = new Map<number, Pending>()
+  readonly #resolveFrame: HubOptions['resolveFrame']
+  /** The latest server-side entries, whichever sessions were open. */
+  readonly recent: Array<Omit<LogEntry, 'n'>> = []
   #nextCall = 1
 
   constructor(options: HubOptions = {}) {
     this.#size = options.size ?? 1000
     this.#keep = options.sessions ?? 10
     this.#callTimeoutMs = options.callTimeoutMs ?? 15_000
+    this.#resolveFrame = options.resolveFrame
   }
 
   attach(connection: Connection): void {
@@ -108,9 +128,17 @@ export class Hub {
       connectedAt: Date.now(),
       entries: [],
       dropped: 0,
+      nextN: 1,
+      pageSeq: 0,
       connection,
     }
     this.sessions.set(info.id, session)
+    // What the dev server did just before this page loaded, such as the
+    // reload that caused it.
+    const cutoff = Date.now() - GREETING_MS
+    for (const entry of this.recent) {
+      if (entry.t >= cutoff) this.#append(session, entry)
+    }
     this.#evict()
     return session
   }
@@ -122,13 +150,72 @@ export class Hub {
     }
   }
 
-  #ingest(session: Session, entries: Array<LogEntry>): void {
+  #ingest(session: Session, entries: Array<PageEntry>): void {
     if (!Array.isArray(entries)) return
-    session.entries.push(...entries)
+    for (const { seq, frames, ...entry } of entries) {
+      const stored = this.#append(session, entry)
+      if (typeof seq === 'number' && seq > session.pageSeq) session.pageSeq = seq
+      if (frames && frames.length > 0) {
+        void this.resolveFrames(frames).then((at) => {
+          if (at.length > 0) stored.at = at
+        })
+      }
+    }
+  }
+
+  #append(session: Session, entry: Omit<LogEntry, 'n'>): LogEntry {
+    const stored: LogEntry = { ...entry, n: session.nextN++ }
+    session.entries.push(stored)
     const extra = session.entries.length - this.#size
     if (extra > 0) {
       session.entries.splice(0, extra)
       session.dropped += extra
+    }
+    return stored
+  }
+
+  /**
+   * Adds an entry that comes from the dev server, not from a page, to every
+   * open session's log.
+   */
+  recordServer(entry: Omit<LogEntry, 'n' | 't'>): void {
+    const stamped = { ...entry, t: Date.now() }
+    this.recent.push(stamped)
+    if (this.recent.length > RECENT) this.recent.shift()
+    for (const session of this.sessions.values()) {
+      if (session.connected) this.#append(session, stamped)
+    }
+  }
+
+  /** Each frame as a place in the source, most recent call first. */
+  async resolveFrames(frames: Array<Frame>): Promise<Array<string>> {
+    const out: Array<string> = []
+    for (const frame of frames) {
+      let place: string | undefined
+      try {
+        place = await this.#resolveFrame?.(frame)
+      } catch {
+        place = undefined
+      }
+      if (place === undefined) {
+        let path = frame.url
+        try {
+          path = new URL(frame.url).pathname.replace(/^\//, '')
+        } catch {
+          // Keep the raw URL.
+        }
+        place = `${frame.fn ? `${frame.fn} ` : ''}${path}:${frame.line}:${frame.column} (served code)`
+      }
+      out.push(place)
+    }
+    return out
+  }
+
+  /** Resolves once the page's entries up to `seq` have arrived, or in 500 ms. */
+  async caughtUp(session: Session, seq: number): Promise<void> {
+    const deadline = Date.now() + 500
+    while (session.pageSeq < seq && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
     }
   }
 

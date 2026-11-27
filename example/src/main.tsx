@@ -10,13 +10,13 @@ import {
   Link,
   Outlet,
   RouterProvider,
-  createRootRoute,
+  createRootRouteWithContext,
   createRoute,
   createRouter,
 } from '@tanstack/react-router'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { connect } from 'tanstack-devtools-mcp/client'
+import { Home } from './Home'
 
 interface Post {
   id: number
@@ -24,39 +24,24 @@ interface Post {
   likes: number
 }
 
-const posts: Array<Post> = [
-  { id: 1, title: 'Queries are a cache', likes: 3 },
-  { id: 2, title: 'Routes are state', likes: 5 },
-  { id: 3, title: 'Agents need eyes', likes: 8 },
-]
-
-const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`/api/posts${path}`, init)
+  const body = await response.json()
+  if (!response.ok) throw new Error(body.message)
+  return body
+}
 
 const api = {
-  async list() {
-    await wait(120)
-    return posts.map((post) => ({ ...post }))
-  },
-  async get(id: number) {
-    await wait(120)
-    const post = posts.find((candidate) => candidate.id === id)
-    if (!post) throw new Error(`Post ${id} not found`)
-    return { ...post }
-  },
-  async like(id: number) {
-    await wait(120)
-    const post = posts.find((candidate) => candidate.id === id)
-    if (!post) throw new Error(`Post ${id} not found`)
-    post.likes += 1
-    return { ...post }
-  },
+  list: () => request<Array<Post>>(''),
+  get: (id: number) => request<Post>(`/${id}`),
+  like: (id: number) => request<Post>(`/${id}/like`, { method: 'POST' }),
 }
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 30_000, retry: false } },
 })
 
-const rootRoute = createRootRoute({
+const rootRoute = createRootRouteWithContext<{ queryClient: QueryClient }>()({
   component: () => (
     <main style={{ fontFamily: 'system-ui', maxWidth: 560, margin: '2rem auto' }}>
       <nav style={{ display: 'flex', gap: 12 }}>
@@ -71,7 +56,7 @@ const rootRoute = createRootRoute({
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
-  component: () => <p>Open Posts, then ask your agent what the page is doing.</p>,
+  component: Home,
 })
 
 const postsRoute = createRoute({
@@ -143,6 +128,8 @@ const router = createRouter({
     indexRoute,
     postsRoute.addChildren([postRoute]),
   ]),
+  // The plugin finds the QueryClient here; the app has no devtools code.
+  context: { queryClient },
 })
 
 declare module '@tanstack/react-router' {
@@ -152,23 +139,19 @@ declare module '@tanstack/react-router' {
 }
 
 if (import.meta.env.DEV) {
-  // The Vite plugin already connected the page; this adds the QueryClient.
-  // The router is found on its own.
-  connect({ queryClient })
-
-  // Any library can add its own tools the way TanStack Devtools documents.
+  // Optional: any code can add its own tools the way TanStack Devtools documents.
   registerDevtoolsTools({
     pluginId: 'example',
     tools: [
       {
         name: 'getPosts',
-        description: 'The posts in the fake API, bypassing the query cache.',
+        description: 'The posts as the API returns them, bypassing the query cache.',
         annotations: { readOnlyHint: true },
-        execute: () => posts,
+        execute: () => api.list(),
       },
       {
         name: 'likePost',
-        description: 'Adds one like to a post in the fake API.',
+        description: 'Adds one like to a post through the API.',
         inputSchema: {
           type: 'object',
           properties: { id: { type: 'number' } },

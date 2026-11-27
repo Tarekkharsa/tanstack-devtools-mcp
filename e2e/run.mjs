@@ -1,6 +1,7 @@
 // Drives the example app in a real Chrome and reads it back through MCP.
 // Run with `pnpm e2e`. Needs Google Chrome installed.
 import assert from 'node:assert/strict'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
@@ -11,6 +12,9 @@ const MCP_PORT = 4791
 process.env.MCP_PORT = String(MCP_PORT)
 
 const root = fileURLToPath(new URL('../example', import.meta.url))
+const homeFile = fileURLToPath(new URL('../example/src/Home.tsx', import.meta.url))
+const homeSource = readFileSync(homeFile, 'utf8')
+
 const vite = await createServer({ root, server: { port: 5191, strictPort: true } })
 await vite.listen()
 const appUrl = vite.resolvedUrls.local[0]
@@ -36,6 +40,9 @@ async function step(name, run) {
   }
 }
 
+const kinds = (entries) => entries.map((e) => `${e.source}/${e.type}`)
+const mark = async () => (await call('count_events')).lastEntry
+
 try {
   const page = await browser.newPage()
   const pageErrors = []
@@ -50,25 +57,62 @@ try {
     ),
   )
 
-  await step('the page connected with Query, Router and its tools', async () => {
+  await step("Vite's client carries the import, for apps with no index.html", async () => {
+    const viteClient = await (await fetch(new URL('@vite/client', appUrl))).text()
+    assert.match(viteClient, /@id\/__x00__tanstack-devtools-mcp:entry/)
+    const entry = await fetch(new URL('@id/__x00__tanstack-devtools-mcp:entry', appUrl))
+    assert.equal(entry.status, 200)
+    assert.match(await entry.text(), /connect\(\{ url: "ws:\/\/127\.0\.0\.1:4791\/bridge" \}\)/)
+  })
+
+  await step('the page connected with no code in the app', async () => {
     const { sessions, actions } = await call('list_sessions')
     assert.equal(actions, true)
     assert.equal(sessions.length, 1)
     assert.equal(sessions[0].connected, true)
+    // The router is found on window, the QueryClient in the router context.
     assert.deepEqual(sessions[0].has, { query: true, router: true })
     assert.equal(sessions[0].tools, 2)
-    assert.match(sessions[0].url, /\/posts$/)
+  })
+
+  await step('overview answers "what is this page doing" in one call', async () => {
+    const overview = await call('overview')
+    assert.match(overview.url, /\/posts$/)
+    assert.equal(overview.idle, true)
+    assert.deepEqual(overview.router, {
+      status: 'idle',
+      href: '/posts',
+      matches: ['__root__', '/posts'],
+    })
+    assert.deepEqual(overview.query.byStatus, { success: 1 })
+    assert.equal(overview.problems.total, 0)
   })
 
   await step('list_queries and get_query read the cache', async () => {
     const { queries } = await call('list_queries')
     assert.deepEqual(
-      queries.map((q) => [q.queryHash, q.status]),
-      [['["posts"]', 'success']],
+      queries.map((q) => [q.queryHash, q.status, q.observers]),
+      [['["posts"]', 'success', 1]],
     )
     const query = await call('get_query', { queryHash: '["posts"]' })
     assert.equal(query.data.length, 3)
     assert.equal(query.data[1].title, 'Routes are state')
+    assert.deepEqual(
+      (await call('get_query', { queryHash: '["posts"]', path: [2, 'title'] })).data,
+      'Agents need eyes',
+    )
+  })
+
+  await step('get_query says where in the source the query is used', async () => {
+    const query = await call('get_query', { queryHash: '["posts"]' })
+    // Created by the route loader, observed by the Posts component: original
+    // lines of main.tsx, mapped back through Vite's source maps.
+    const source = readFileSync(new URL('../example/src/main.tsx', import.meta.url), 'utf8').split('\n')
+    const lineOf = (text) => source.findIndex((line) => line.includes(text)) + 1
+    const places = query.usedAt.join('\n')
+    assert.match(places, new RegExp(`src/main\\.tsx:${lineOf("ensureQueryData({ queryKey: ['posts']")}:`), places)
+    assert.match(places, new RegExp(`Posts src/main\\.tsx:${lineOf("useQuery({ queryKey: ['posts']")}:`), places)
+    assert.doesNotMatch(places, /served code|node_modules/)
   })
 
   await step('get_router_state and list_routes read the router', async () => {
@@ -78,15 +122,13 @@ try {
       state.matches.map((m) => m.routeId),
       ['__root__', '/posts'],
     )
-    const { routes } = await call('list_routes')
-    const post = routes.find((r) => r.id === '/posts/$postId')
-    assert.equal(post.fullPath, '/posts/$postId')
-    assert.equal(post.hasLoader, true)
+    const { routes } = await call('list_routes', { contains: 'postId' })
+    assert.deepEqual(routes, [{ id: '/posts/$postId', has: ['loader'] }])
   })
 
-  let mark = 0
+  let before = 0
   await step('navigate drives the router and the page follows', async () => {
-    mark = (await call('list_events', { limit: 1 })).lastEntry
+    before = await mark()
     const result = await call('navigate', {
       to: '/posts/$postId',
       params: { postId: '2' },
@@ -95,31 +137,42 @@ try {
     await page.getByRole('heading', { name: 'Routes are state' }).waitFor()
   })
 
-  await step('wait_for_idle returns what the navigation caused', async () => {
-    const result = await call('wait_for_idle', { after: mark })
+  await step('one timeline: navigation, query, request, with timings and sources', async () => {
+    const result = await call('wait_for_idle', { after: before })
     assert.equal(result.idle, true)
-    const seen = result.entries.map((e) => `${e.source}/${e.type}`)
-    assert.ok(seen.includes('router/onBeforeNavigate'), seen.join(' '))
-    assert.ok(seen.includes('router/onResolved'), seen.join(' '))
-    assert.ok(seen.includes('query/fetch'), seen.join(' '))
-    assert.ok(seen.includes('query/success'), seen.join(' '))
-    const fetched = result.entries.find(
-      (e) => e.source === 'query' && e.type === 'success',
-    )
-    assert.equal(fetched.key, '["post",2]')
+    const seen = kinds(result.entries)
+    for (const kind of ['router/onBeforeNavigate', 'query/fetch', 'network/ok', 'query/success', 'router/onResolved']) {
+      assert.ok(seen.includes(kind), `${kind} missing from ${seen.join(' ')}`)
+    }
+    const request = result.entries.find((e) => e.source === 'network')
+    assert.equal(request.summary, 'GET /api/posts/2 → 200')
+    assert.ok(request.ms >= 70, `request took ${request.ms} ms`)
+    assert.match(request.from, /^request src\/main\.tsx:\d+:\d+$/)
+    const fetched = result.entries.find((e) => e.source === 'query' && e.type === 'success')
+    assert.equal(fetched.summary, '["post",2] success')
+    assert.ok(fetched.ms >= 70)
+    const resolved = result.entries.find((e) => e.type === 'onResolved')
+    assert.ok(resolved.ms >= 70)
   })
 
-  await step('a click in the page shows up as a mutation', async () => {
-    const before = (await call('list_events', { limit: 1 })).lastEntry
+  await step('a click in the page shows up as a mutation, and diff_query shows its effect', async () => {
+    before = await mark()
     await page.getByRole('button', { name: /Like/ }).click()
     await page.getByRole('button', { name: 'Like (6)' }).waitFor()
-    await call('wait_for_idle', { after: before })
+    const waited = await call('wait_for_idle', { after: before })
+    const like = waited.entries.find((e) => e.source === 'network' && e.summary.startsWith('POST'))
+    assert.equal(like.summary, 'POST /api/posts/2/like → 200')
     const { mutations } = await call('list_mutations')
     assert.equal(mutations.at(-1).status, 'success')
     assert.deepEqual(mutations.at(-1).mutationKey, ['like', 2])
     const { counts } = await call('count_events', { after: before })
     assert.ok(counts['mutation/success'] >= 1, JSON.stringify(counts))
     assert.ok(counts['query/invalidate'] >= 2, JSON.stringify(counts))
+
+    const diff = await call('diff_query', { queryHash: '["post",2]' })
+    assert.deepEqual(diff.changes, [
+      { path: 'likes', kind: 'changed', before: 5, after: 6 },
+    ])
   })
 
   await step('set_query_data changes what the page renders', async () => {
@@ -149,30 +202,101 @@ try {
     assert.equal(liked.likes, 9)
   })
 
-  await step('a failing loader is visible as an error', async () => {
-    const before = (await call('list_events', { limit: 1 })).lastEntry
+  await step('a failing loader is visible as an error, and diagnose explains it', async () => {
+    const healthy = await call('diagnose')
+    assert.equal(healthy.ok, true, JSON.stringify(healthy.findings, null, 1))
+    before = await mark()
     await call('navigate', { to: '/posts/$postId', params: { postId: '99' } })
     await page.getByRole('alert').waitFor()
     await call('wait_for_idle', { after: before })
-    const { entries } = await call('list_events', {
-      source: 'query',
-      type: 'error',
-      after: before,
+
+    const { entries } = await call('list_events', { problems: true, after: before })
+    const seen = kinds(entries)
+    assert.ok(seen.includes('network/error'), seen.join(' '))
+    assert.ok(seen.includes('query/error'), seen.join(' '))
+    const request = entries.find((e) => e.source === 'network')
+    assert.equal(request.summary, 'GET /api/posts/99 → 404')
+
+    const result = await call('diagnose', { after: before })
+    assert.equal(result.ok, false)
+    const titles = result.findings.map((f) => f.title)
+    assert.ok(titles.includes('A matched route is showing an error'), titles.join(' | '))
+    assert.ok(titles.includes('1 query is in the error state'), titles.join(' | '))
+    assert.ok(titles.includes('1 failed requests'), titles.join(' | '))
+    const route = result.findings.find((f) => f.title.startsWith('A matched route'))
+    assert.match(route.evidence[0], /\/posts\/\$postId: Error: Post 99 not found/)
+  })
+
+  await step('after an edit: a hot update, and the page shows the new code', async () => {
+    await page.getByRole('link', { name: 'Home' }).click()
+    await page.getByText('Open Posts, then ask your agent').waitFor()
+    await call('wait_for_idle')
+    before = await mark()
+    writeFileSync(homeFile, homeSource.replace('Open Posts, then ask', 'Edited by a test, then ask'))
+    const result = await call('wait_for_update', { after: before })
+    assert.equal(result.update, 'hmr-update', JSON.stringify(result, null, 1))
+    assert.deepEqual(result.files, ['src/Home.tsx'])
+    assert.equal(result.idle, true)
+    assert.deepEqual(result.problems, [])
+    assert.deepEqual(kinds(result.entries).slice(0, 2), ['vite/change', 'vite/hmr-update'])
+    await page.getByText('Edited by a test, then ask').waitFor()
+  })
+
+  await step('after a broken edit: the build error, with its place and code frame', async () => {
+    await page.waitForTimeout(300)
+    before = await mark()
+    writeFileSync(homeFile, 'export function Home() {\n  return <p>unclosed\n}\n')
+    const result = await call('wait_for_update', { after: before })
+    assert.equal(result.update, 'error', JSON.stringify(result, null, 1))
+    assert.equal(result.problems.length, 1)
+    assert.match(result.problems[0].summary, /^build error in src\/Home\.tsx.*PARSE_ERROR.*Unexpected token/)
+    assert.match(result.problems[0].detail.message, /Home\.tsx:3:1/)
+    const diagnosis = await call('diagnose', { after: before })
+    assert.match(diagnosis.findings[0].title, /Vite reports a build error/)
+  })
+
+  await step('after the fix: the update goes through and the error is gone', async () => {
+    // The file watcher drops a change that lands within 50 ms of the last.
+    await page.waitForTimeout(300)
+    before = await mark()
+    writeFileSync(homeFile, homeSource)
+    const result = await call('wait_for_update', { after: before })
+    assert.ok(['hmr-update', 'full-reload'].includes(result.update), result.update)
+    assert.deepEqual(result.problems, [])
+    await page.getByText('Open Posts, then ask your agent').waitFor()
+    // The whole log this time: the build error is in it, and no longer counts.
+    const diagnosis = await call('diagnose', { session: result.session })
+    assert.ok(
+      !diagnosis.findings.some((f) => /build error/.test(f.title)),
+      JSON.stringify(diagnosis.findings),
+    )
+  })
+
+  await step('an uncaught error carries the source line that threw', async () => {
+    before = await mark()
+    await page.evaluate(() => {
+      setTimeout(() => {
+        throw new Error('thrown on purpose')
+      }, 0)
     })
+    await page.waitForTimeout(150)
+    const { entries } = await call('list_events', { source: 'console', after: before })
     assert.equal(entries.length, 1)
-    assert.match(entries[0].summary, /Post 99 not found/)
-    const { queries } = await call('list_queries', { status: 'error' })
-    assert.equal(queries[0].queryHash, '["post",99]')
+    assert.equal(entries[0].type, 'uncaught')
+    assert.equal(entries[0].summary, 'Error: thrown on purpose')
+    pageErrors.length = 0
   })
 
   await step('the log outlives the page; live reads say why they cannot', async () => {
+    const { session } = await call('overview')
     await page.close()
     await new Promise((resolve) => setTimeout(resolve, 200))
-    const { sessions } = await call('list_sessions')
-    assert.equal(sessions[0].connected, false)
-    const { entries } = await call('list_events', { source: 'router', limit: 3 })
+    const overview = await call('overview', { session })
+    assert.equal(overview.connected, false)
+    assert.match(overview.note, /page is closed/)
+    const { entries } = await call('list_events', { session, source: 'router', limit: 3 })
     assert.equal(entries.length, 3)
-    await assert.rejects(call('list_queries'), /no open page/)
+    await assert.rejects(call('list_queries', { session }), /no open page/)
   })
 
   assert.deepEqual(pageErrors, [], 'the page threw')
@@ -180,6 +304,7 @@ try {
   failed = true
   console.error(error)
 } finally {
+  writeFileSync(homeFile, homeSource)
   await client.close().catch(() => {})
   await browser.close()
   await vite.close()

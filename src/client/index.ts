@@ -1,15 +1,25 @@
 import { BRIDGE_PATH, DEFAULT_PORT } from '../protocol.js'
-import { captureTools, recordBus, recordConsole } from './capture.js'
-import { queryHandlers, recordQuery } from './query.js'
-import { recordRouter, routerHandlers, routerIdle } from './router.js'
+import {
+  captureTools,
+  recordBus,
+  recordConsole,
+  recordNetwork,
+} from './capture.js'
+import { queryHandlers, queryOverview, recordQuery } from './query.js'
+import {
+  recordRouter,
+  routerHandlers,
+  routerIdle,
+  routerOverview,
+} from './router.js'
 import { bounded } from './serialize.js'
 import type {
-  LogEntry,
+  PageEntry,
   PageMessage,
   ServerMessage,
   SessionInfo,
 } from '../protocol.js'
-import type { CapturedTool } from './capture.js'
+import type { CapturedTool, NetworkRecorder } from './capture.js'
 import type { QueryClientLike } from './query.js'
 import type { RouterLike } from './router.js'
 import type { Handlers, Recorder } from './types.js'
@@ -29,12 +39,17 @@ export interface SocketLike {
 export interface ConnectOptions {
   /** The server's bridge URL. Defaults to the URL the Vite plugin injects. */
   url?: string
-  /** Read from `window.__TANSTACK_QUERY_CLIENT__` when left out. */
+  /**
+   * When left out, read from the router context (`context.queryClient`) or
+   * `window.__TANSTACK_QUERY_CLIENT__`.
+   */
   queryClient?: QueryClientLike
   /** Read from `window.__TSR_ROUTER__`, which TanStack Router sets, when left out. */
   router?: RouterLike
   /** Record `console.error`, `console.warn` and uncaught errors. Default true. */
   console?: boolean
+  /** Record `fetch` and `XMLHttpRequest` calls. Default true. */
+  network?: boolean
   /** Replaces `new WebSocket(url)`, for tests. */
   createSocket?: (url: string) => SocketLike
 }
@@ -68,8 +83,9 @@ class Bridge {
   readonly startedAt = Date.now()
   readonly tools = new Map<string, CapturedTool>()
 
-  #n = 0
-  #unsent: Array<LogEntry> = []
+  #seq = 0
+  #unsent: Array<PageEntry> = []
+  #network: NetworkRecorder | undefined
   #stops = new Map<string, () => void>()
   #queryClient: QueryClientLike | undefined
   #router: RouterLike | undefined
@@ -88,10 +104,38 @@ class Bridge {
   constructor() {
     captureTools(this.tools, () => this.#scheduleFlush())
     this.#rebuild()
+    this.#watch('__TSR_ROUTER__')
+    this.#watch('__TANSTACK_QUERY_CLIENT__')
+  }
+
+  /**
+   * Notices the moment a library puts its instance on `window`, so recording
+   * starts before the first loader or query runs, not at the next poll.
+   */
+  #watch(name: string): void {
+    const globals = globalThis as any
+    if (globals[name] !== undefined) return
+    let value: unknown
+    try {
+      Object.defineProperty(globals, name, {
+        configurable: true,
+        enumerable: true,
+        get: () => value,
+        set: (next: unknown) => {
+          value = next
+          // The setter runs inside the instance's constructor; let it finish.
+          queueMicrotask(() => {
+            if (this.#wanted) this.#discover()
+          })
+        },
+      })
+    } catch {
+      // Something else defined it first; the timed checks still find it.
+    }
   }
 
   record: Recorder = (entry) => {
-    this.#unsent.push({ ...entry, n: ++this.#n, t: Date.now() })
+    this.#unsent.push({ ...entry, seq: ++this.#seq, t: Date.now() })
     if (this.#unsent.length > MAX_UNSENT) this.#unsent.shift()
     this.#scheduleFlush()
   }
@@ -102,6 +146,14 @@ class Bridge {
     if (options.router) this.#attachRouter(options.router, true)
     if (options.console !== false && !this.#stops.has('console')) {
       this.#stops.set('console', recordConsole(this.record))
+    }
+    if (options.network !== false && !this.#network) {
+      const network = recordNetwork(this.record)
+      this.#network = network
+      this.#stops.set('network', () => {
+        network.stop()
+        this.#network = undefined
+      })
     }
     if (!this.#stops.has('bus')) this.#stops.set('bus', recordBus(this.record))
 
@@ -169,6 +221,11 @@ class Bridge {
     if (!this.#pinned.router && isRouter(globals.__TSR_ROUTER__)) {
       this.#attachRouter(globals.__TSR_ROUTER__, false)
     }
+    // The usual Router and Query setup keeps the client in the router context.
+    const inContext = this.#router?.options?.context?.queryClient
+    if (!this.#pinned.query && !this.#queryClient && isQueryClient(inContext)) {
+      this.#attachQuery(inContext, false)
+    }
   }
 
   #rebuild(): void {
@@ -176,6 +233,7 @@ class Bridge {
       ...(this.#queryClient ? queryHandlers(this.#queryClient) : {}),
       ...(this.#router ? routerHandlers(this.#router) : {}),
       'page.wait': (args) => this.#wait(args),
+      'page.overview': () => this.#overview(),
       'tool.call': (args) => this.#callTool(args),
     }
     this.#scheduleFlush()
@@ -186,7 +244,20 @@ class Bridge {
     if (client && (client.isFetching() > 0 || client.isMutating() > 0)) {
       return false
     }
-    return this.#router ? routerIdle(this.#router) : true
+    if (this.#router && !routerIdle(this.#router)) return false
+    return (this.#network?.pending() ?? 0) === 0
+  }
+
+  #overview() {
+    return {
+      url: typeof location === 'undefined' ? '' : location.href,
+      title: typeof document === 'undefined' ? '' : document.title,
+      idle: this.#idle(),
+      router: this.#router ? routerOverview(this.#router) : null,
+      query: this.#queryClient ? queryOverview(this.#queryClient) : null,
+      pendingRequests: this.#network?.pending() ?? 0,
+      tools: this.tools.size,
+    }
   }
 
   /** Resolves once queries, mutations and the router have settled. */
@@ -202,7 +273,7 @@ class Bridge {
         else quietSince = undefined
         const idle = quietSince !== undefined && now - quietSince >= quietMs
         if (idle || now - started >= timeoutMs) {
-          resolve({ idle, waitedMs: now - started, lastEntry: this.#n })
+          resolve({ idle, waitedMs: now - started, lastSeq: this.#seq })
           return
         }
         setTimeout(check, 20)

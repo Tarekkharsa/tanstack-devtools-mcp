@@ -120,3 +120,79 @@ export function brief(value: unknown, chars = 200): string {
     return '[Unserializable]'
   }
 }
+
+/** Follows `path` into `value`, as `["items", 0, "price"]` does. */
+export function drill(value: unknown, path: Array<string | number>): unknown {
+  let current: any = value
+  const walked: Array<string | number> = []
+  for (const step of path) {
+    if (current instanceof Map) current = current.get(step)
+    else if (current !== null && typeof current === 'object') current = current[step]
+    else current = undefined
+    walked.push(step)
+    if (current === undefined) {
+      throw new Error(`Nothing at path ${JSON.stringify(walked)}`)
+    }
+  }
+  return current
+}
+
+export interface Change {
+  path: string
+  kind: 'added' | 'removed' | 'changed'
+  before?: unknown
+  after?: unknown
+}
+
+const small: Bounds = { depth: 2, items: 5, chars: 200 }
+
+/**
+ * What differs between two values, as a list of paths. A subtree both sides
+ * share by reference is skipped, which makes it cheap on TanStack Query data.
+ */
+export function diff(
+  before: unknown,
+  after: unknown,
+  limit = 50,
+): { changes: Array<Change>; more: number } {
+  const changes: Array<Change> = []
+  let total = 0
+  const push = (change: Change) => {
+    total += 1
+    if (changes.length < limit) changes.push(change)
+  }
+  const isBranch = (value: unknown): value is Record<string, unknown> =>
+    value !== null && typeof value === 'object' && !(value instanceof Date)
+
+  const walk = (a: unknown, b: unknown, path: string, level: number) => {
+    if (Object.is(a, b)) return
+    if (isBranch(a) && isBranch(b) && Array.isArray(a) === Array.isArray(b) && level < 12) {
+      const keys = new Set([...Object.keys(a), ...Object.keys(b)])
+      for (const key of keys) {
+        const next = path === '' ? key : `${path}.${key}`
+        if (!(key in a)) push({ path: next, kind: 'added', after: bounded(b[key], small) })
+        else if (!(key in b)) push({ path: next, kind: 'removed', before: bounded(a[key], small) })
+        else walk(a[key], b[key], next, level + 1)
+      }
+      return
+    }
+    if (a instanceof Date && b instanceof Date && a.getTime() === b.getTime()) return
+    push({
+      path: path === '' ? '(root)' : path,
+      kind: 'changed',
+      before: bounded(a, small),
+      after: bounded(b, small),
+    })
+  }
+  walk(before, after, '', 0)
+  return { changes, more: total - changes.length }
+}
+
+/** "3s ago", "2m ago": short enough to sit in every row. */
+export function ago(timestamp: number, now = Date.now()): string {
+  const seconds = Math.max(0, Math.round((now - timestamp) / 1000))
+  if (seconds < 90) return `${seconds}s ago`
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 90) return `${minutes}m ago`
+  return `${Math.round(minutes / 60)}h ago`
+}

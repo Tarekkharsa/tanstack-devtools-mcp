@@ -1,4 +1,6 @@
-import { bounded, brief } from './serialize.js'
+import { ago, bounded, brief, diff, drill } from './serialize.js'
+import { here } from './stack.js'
+import type { Frame } from '../protocol.js'
 import type { Handlers, Recorder } from './types.js'
 
 /**
@@ -9,6 +11,7 @@ export interface QueryClientLike {
   getQueryCache: () => {
     getAll: () => Array<any>
     subscribe: (listener: (event: any) => void) => () => void
+    build?: (...args: Array<any>) => any
   }
   getMutationCache: () => {
     getAll: () => Array<any>
@@ -26,22 +29,54 @@ export interface QueryClientLike {
 const queryActions = ['invalidate', 'refetch', 'reset', 'remove'] as const
 type QueryAction = (typeof queryActions)[number]
 
-function summarize(query: any) {
-  const state = query.state ?? {}
-  return {
-    queryHash: String(query.queryHash),
-    queryKey: bounded(query.queryKey, { depth: 4, items: 20, chars: 200 }),
-    status: state.status,
-    fetchStatus: state.fetchStatus,
-    stale: safe(() => query.isStale(), false),
-    invalidated: Boolean(state.isInvalidated),
-    observers: safe(() => query.getObserversCount(), 0),
-    disabled: safe(() => query.isDisabled(), false),
-    dataUpdatedAt: state.dataUpdatedAt || null,
-    errorUpdatedAt: state.errorUpdatedAt || null,
-    failureCount: state.fetchFailureCount ?? 0,
-    ...(state.error ? { error: brief(state.error) } : {}),
+/** What the recorder remembers about one query, beyond what Query keeps. */
+interface Memory {
+  fetchStarted?: number
+  /** Call sites that created or observed the query, keyed by top frame. */
+  sites: Map<string, Array<Frame>>
+  /** Stack captures spent on this query; they stop at a small budget. */
+  looks: number
+  hasData: boolean
+  current?: unknown
+  previous?: unknown
+  changedAt?: number
+}
+
+const memories = new WeakMap<object, Memory>()
+const MAX_SITES = 5
+const MAX_LOOKS = 30
+
+function memoryOf(query: object): Memory {
+  let memory = memories.get(query)
+  if (!memory) {
+    memory = { sites: new Map(), looks: 0, hasData: false }
+    memories.set(query, memory)
   }
+  return memory
+}
+
+function noteSite(query: object, frames: Array<Frame>): void {
+  const top = frames[0]
+  if (!top) return
+  const sites = memoryOf(query).sites
+  const id = `${top.url}:${top.line}:${top.column}`
+  if (sites.has(id) || sites.size >= MAX_SITES) return
+  sites.set(id, frames)
+}
+
+function noteData(query: any): void {
+  const memory = memoryOf(query)
+  const data = query.state?.data
+  if (data === undefined) return
+  if (!memory.hasData) {
+    memory.hasData = true
+    memory.current = data
+    return
+  }
+  if (data === memory.current) return
+  memory.previous = memory.current
+  memory.current = data
+  memory.changedAt = Date.now()
 }
 
 function safe<T>(read: () => T, fallback: T): T {
@@ -49,6 +84,23 @@ function safe<T>(read: () => T, fallback: T): T {
     return read()
   } catch {
     return fallback
+  }
+}
+
+/** One row per query. Fields at their usual value are left out. */
+function row(query: any) {
+  const state = query.state ?? {}
+  return {
+    queryHash: String(query.queryHash),
+    status: state.status as string,
+    ...(state.fetchStatus !== 'idle' ? { fetch: state.fetchStatus } : {}),
+    ...(safe(() => query.isStale(), false) ? { stale: true } : {}),
+    ...(state.isInvalidated ? { invalidated: true } : {}),
+    ...(safe(() => query.isDisabled(), false) ? { disabled: true } : {}),
+    observers: safe(() => query.getObserversCount(), 0),
+    ...(state.dataUpdatedAt ? { updated: ago(state.dataUpdatedAt) } : {}),
+    ...(state.fetchFailureCount ? { failures: state.fetchFailureCount } : {}),
+    ...(state.error ? { error: brief(state.error) } : {}),
   }
 }
 
@@ -67,36 +119,100 @@ function matcher(args: { queryHash?: string; keyContains?: string }) {
   }
 }
 
+function tally(values: Array<string>): Record<string, number> {
+  const counts: Record<string, number> = {}
+  for (const value of values) counts[value] = (counts[value] ?? 0) + 1
+  return counts
+}
+
+/** The first two segments of a key, which is how apps usually namespace. */
+function family(query: any): string {
+  const key = Array.isArray(query.queryKey) ? query.queryKey : [query.queryKey]
+  return key
+    .slice(0, 2)
+    .map((part: unknown) => (typeof part === 'string' ? part : '…'))
+    .join('/')
+}
+
+export function queryOverview(client: QueryClientLike) {
+  const all = client.getQueryCache().getAll()
+  const mutations = client.getMutationCache().getAll()
+  return {
+    total: all.length,
+    byStatus: tally(all.map((q) => String(q.state?.status))),
+    fetching: all
+      .filter((q) => q.state?.fetchStatus === 'fetching')
+      .map((q) => String(q.queryHash))
+      .slice(0, 20),
+    errors: all
+      .filter((q) => q.state?.status === 'error')
+      .slice(0, 20)
+      .map((q) => ({ queryHash: String(q.queryHash), error: brief(q.state.error) })),
+    mutations: {
+      total: mutations.length,
+      pending: mutations.filter((m) => m.state?.status === 'pending').length,
+      failed: mutations.filter((m) => m.state?.status === 'error').length,
+    },
+  }
+}
+
 export function queryHandlers(client: QueryClientLike): Handlers {
   const all = () => client.getQueryCache().getAll()
+  const find = (hash: unknown) => {
+    const query = all().find((q) => q.queryHash === hash)
+    if (!query) throw new Error(`No query with hash ${String(hash)}`)
+    return query
+  }
   return {
     'query.list': (args) => {
-      const matches = all()
-        .filter(matcher(args))
-        .map(summarize)
+      const candidates = all().filter(matcher(args))
+      const matches = candidates
+        .map(row)
         .filter(
           (query) =>
             (args.status === undefined || query.status === args.status) &&
             (args.fetchStatus === undefined ||
-              query.fetchStatus === args.fetchStatus) &&
-            (args.stale === undefined || query.stale === args.stale),
+              (query.fetch ?? 'idle') === args.fetchStatus) &&
+            (args.stale === undefined || (query.stale ?? false) === args.stale),
         )
-      const limit = typeof args.limit === 'number' ? args.limit : 100
+      const limit = typeof args.limit === 'number' ? args.limit : 50
       return {
         total: matches.length,
+        byStatus: tally(matches.map((q) => q.status)),
         fetching: client.isFetching(),
+        ...(candidates.length > 10 ? { families: tally(candidates.map(family)) } : {}),
         queries: matches.slice(0, limit),
+        ...(matches.length > limit ? { more: matches.length - limit } : {}),
       }
     },
     'query.get': (args) => {
-      const query = all().find((q) => q.queryHash === args.queryHash)
-      if (!query) throw new Error(`No query with hash ${args.queryHash}`)
+      const query = find(args.queryHash)
       const depth = typeof args.depth === 'number' ? args.depth : undefined
+      const path = Array.isArray(args.path) ? args.path : []
+      const data = path.length > 0 ? drill(query.state.data, path) : query.state.data
       return {
-        ...summarize(query),
-        data: bounded(query.state.data, depth === undefined ? {} : { depth }),
+        ...row(query),
+        queryKey: bounded(query.queryKey, { depth: 5, items: 30, chars: 300 }),
+        ...(path.length > 0 ? { path } : {}),
+        data: bounded(data, depth === undefined ? {} : { depth }),
         error: query.state.error ? bounded(query.state.error) : null,
-        fetchMeta: bounded(query.state.fetchMeta ?? null),
+        sites: [...memoryOf(query).sites.values()],
+      }
+    },
+    'query.diff': (args) => {
+      const query = find(args.queryHash)
+      const memory = memoryOf(query)
+      if (memory.changedAt === undefined) {
+        return {
+          queryHash: query.queryHash,
+          note: 'The data has not changed since this page connected.',
+          changes: [],
+        }
+      }
+      return {
+        queryHash: query.queryHash,
+        changed: ago(memory.changedAt),
+        ...diff(memory.previous, memory.current),
       }
     },
     'mutation.list': () => {
@@ -108,9 +224,13 @@ export function queryHandlers(client: QueryClientLike): Handlers {
           mutationId: mutation.mutationId,
           mutationKey: bounded(mutation.options?.mutationKey ?? null),
           status: mutation.state?.status,
-          isPaused: Boolean(mutation.state?.isPaused),
-          submittedAt: mutation.state?.submittedAt || null,
-          failureCount: mutation.state?.failureCount ?? 0,
+          ...(mutation.state?.isPaused ? { paused: true } : {}),
+          ...(mutation.state?.submittedAt
+            ? { submitted: ago(mutation.state.submittedAt) }
+            : {}),
+          ...(mutation.state?.failureCount
+            ? { failures: mutation.state.failureCount }
+            : {}),
           variables: bounded(mutation.state?.variables, { depth: 3 }),
           ...(mutation.state?.error
             ? { error: brief(mutation.state.error) }
@@ -138,10 +258,9 @@ export function queryHandlers(client: QueryClientLike): Handlers {
       return { action, matched }
     },
     'query.setData': (args) => {
-      const query = all().find((q) => q.queryHash === args.queryHash)
-      if (!query) throw new Error(`No query with hash ${args.queryHash}`)
+      const query = find(args.queryHash)
       client.setQueryData(query.queryKey, args.data)
-      return summarize(query)
+      return row(query)
     },
   }
 }
@@ -151,51 +270,139 @@ export function recordQuery(
   client: QueryClientLike,
   record: Recorder,
 ): () => void {
-  const stopQueries = client.getQueryCache().subscribe((event) => {
-    const key = String(event.query?.queryHash)
-    if (event.type === 'added' || event.type === 'removed') {
-      record({ source: 'query', type: event.type, key, summary: key })
+  // What the cache already holds, such as queries a server render sent along.
+  const existing = client.getQueryCache().getAll()
+  for (const query of existing) noteData(query)
+  if (existing.length > 0) {
+    const counts = Object.entries(tally(existing.map((q) => String(q.state?.status))))
+      .map(([status, count]) => `${count} ${status}`)
+      .join(', ')
+    record({
+      source: 'query',
+      type: 'attached',
+      summary: `${existing.length} queries already in the cache: ${counts}`,
+    })
+  }
+
+  // A component reaches its query through `build` while it renders, which is
+  // the one moment the component is on the stack. Each query gets a small
+  // budget of looks, so a hot render path pays next to nothing.
+  const cache = client.getQueryCache()
+  const build = cache.build
+  let patched: typeof build
+  if (typeof build === 'function') {
+    patched = function (this: unknown, ...args: Array<any>) {
+      const query = build.apply(this, args)
+      try {
+        const memory = memoryOf(query)
+        if (memory.looks < MAX_LOOKS && memory.sites.size < MAX_SITES) {
+          memory.looks += 1
+          noteSite(query, here())
+        }
+      } catch {
+        // Finding the call site must never get in the way of the query.
+      }
+      return query
+    }
+    cache.build = patched
+  }
+
+  const stopQueries = cache.subscribe((event) => {
+    const query = event.query
+    if (!query) return
+    const key = String(query.queryHash)
+    if (event.type === 'added') {
+      const frames = here()
+      noteSite(query, frames)
+      record({ source: 'query', type: 'added', key, summary: `${key} added`, frames })
+      return
+    }
+    if (event.type === 'removed') {
+      record({ source: 'query', type: 'removed', key, summary: `${key} removed` })
       return
     }
     if (event.type !== 'updated') return
     const action = event.action ?? {}
-    if (action.type === 'setState') return
-    const state = event.query?.state ?? {}
+    const type = String(action.type)
+    if (type === 'setState') return
+    const memory = memoryOf(query)
+    const now = performance.now()
+
+    if (type === 'fetch') {
+      memory.fetchStarted = now
+      record({
+        source: 'query',
+        type,
+        key,
+        summary: `${key} ${memory.hasData ? 'refetching' : 'fetching'}`,
+        frames: here(),
+      })
+      return
+    }
+    const dur =
+      (type === 'success' && !action.manual) || type === 'error'
+        ? memory.fetchStarted === undefined
+          ? undefined
+          : Math.round(now - memory.fetchStarted)
+        : undefined
+    if (dur !== undefined) memory.fetchStarted = undefined
+    if (type === 'success') noteData(query)
+
     record({
       source: 'query',
-      type: String(action.type),
+      type,
       key,
       summary:
-        action.type === 'error' || action.type === 'failed'
-          ? `${key}: ${brief(action.error)}`
-          : `${key} → ${state.status}/${state.fetchStatus}`,
-      ...(action.type === 'success' && action.manual
-        ? { detail: { manual: true } }
-        : {}),
+        type === 'error' || type === 'failed'
+          ? `${key} ${type}: ${brief(action.error)}`
+          : type === 'success'
+            ? `${key} success${action.manual ? ' (set by hand)' : ''}`
+            : type === 'invalidate'
+              ? `${key} invalidated`
+              : `${key} ${type}`,
+      ...(dur !== undefined ? { dur } : {}),
+      ...(type === 'success' && action.manual ? { detail: { manual: true } } : {}),
+      ...(type === 'invalidate' ? { frames: here() } : {}),
     })
   })
+
+  const started = new Map<number, number>()
   const stopMutations = client.getMutationCache().subscribe((event) => {
     const mutation = event.mutation
     if (!mutation) return
-    const key = String(mutation.mutationId)
-    const name = brief(mutation.options?.mutationKey ?? `#${key}`, 80)
-    if (event.type === 'added' || event.type === 'removed') {
-      record({ source: 'mutation', type: event.type, key, summary: name })
+    const id = Number(mutation.mutationId)
+    const key = String(id)
+    const name = brief(mutation.options?.mutationKey ?? `mutation #${key}`, 80)
+    if (event.type === 'added') {
+      record({ source: 'mutation', type: 'added', key, summary: `${name} added`, frames: here() })
+      return
+    }
+    if (event.type === 'removed') {
+      started.delete(id)
+      record({ source: 'mutation', type: 'removed', key, summary: `${name} removed` })
       return
     }
     if (event.type !== 'updated') return
-    const action = event.action ?? {}
+    const type = String(event.action?.type)
+    if (type === 'pending') started.set(id, performance.now())
+    const done = type === 'success' || type === 'error'
+    const begun = started.get(id)
+    if (done) started.delete(id)
     record({
       source: 'mutation',
-      type: String(action.type),
+      type,
       key,
       summary:
-        action.type === 'error'
-          ? `${name}: ${brief(action.error)}`
-          : `${name} → ${mutation.state?.status}`,
+        type === 'error'
+          ? `${name} error: ${brief(event.action.error)}`
+          : `${name} ${type}`,
+      ...(done && begun !== undefined
+        ? { dur: Math.round(performance.now() - begun) }
+        : {}),
     })
   })
   return () => {
+    if (patched && cache.build === patched) cache.build = build
     stopQueries()
     stopMutations()
   }

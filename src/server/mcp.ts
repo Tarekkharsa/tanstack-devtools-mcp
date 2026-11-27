@@ -1,7 +1,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
+import { diagnose, isProblem } from './diagnose.js'
 import type { Hub, Session } from './hub.js'
-import type { LogEntry } from '../protocol.js'
+import type { Frame, LogEntry } from '../protocol.js'
 
 export interface McpOptions {
   /**
@@ -13,10 +14,11 @@ export interface McpOptions {
 }
 
 const instructions = [
-  'Inspects a TanStack app running in a browser tab during development.',
-  'Start with list_sessions. Tools default to the page connected most recently.',
-  'list_events reads the server copy of the log, so it still answers after a reload or a closed tab; every other tool needs an open page.',
-  'After changing something, call wait_for_idle with the last entry number you saw, then read the entries it returns.',
+  'Inspects a TanStack app running in a browser tab during development: the Query cache, the Router, network calls, console errors and what Vite did with each edit, on one numbered timeline.',
+  'Start with overview. After you edit a file, call wait_for_update: it tells you whether the edit compiled and applied, and what the page did next.',
+  'After you change the app with a tool, call wait_for_idle with the last entry number you saw.',
+  'diagnose lists what looks wrong. Entries carry `from`, the place in the source they came from.',
+  'list_events, get_event, count_events and diagnose read the server copy of the log, so they still answer after a reload or a closed tab.',
 ].join(' ')
 
 const session = z
@@ -25,6 +27,11 @@ const session = z
   .describe(
     'Session id from list_sessions. Defaults to the page connected most recently.',
   )
+
+const path = z
+  .array(z.union([z.string(), z.number()]))
+  .optional()
+  .describe('Keys from the root of the data to a subtree, such as ["items", 0].')
 
 function text(value: unknown) {
   return {
@@ -48,20 +55,45 @@ async function guard(run: () => unknown) {
   }
 }
 
-function row(entry: LogEntry) {
+const ROW_CHARS = 200
+
+/**
+ * An entry as a row: no detail, only the fields that say something, and a
+ * summary short enough that fifty rows stay readable. get_event has it whole.
+ */
+export function row(entry: LogEntry) {
+  return shape(
+    entry,
+    entry.summary.length <= ROW_CHARS
+      ? entry.summary
+      : `${entry.summary.slice(0, ROW_CHARS)}…`,
+  )
+}
+
+function shape(entry: LogEntry, summary: string) {
   return {
     n: entry.n,
-    at: new Date(entry.t).toISOString(),
+    time: new Date(entry.t).toISOString().slice(11, 23),
     source: entry.source,
     type: entry.type,
-    ...(entry.key !== undefined ? { key: entry.key } : {}),
-    summary: entry.summary,
+    ...(entry.key !== undefined && !summary.includes(entry.key)
+      ? { key: entry.key }
+      : {}),
+    summary,
+    ...(entry.dur !== undefined ? { ms: entry.dur } : {}),
+    ...(entry.at?.[0] !== undefined ? { from: entry.at[0] } : {}),
   }
 }
 
 function lastEntry(target: Session): number {
   return target.entries.at(-1)?.n ?? 0
 }
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const UPDATE_TYPES = new Set(['hmr-update', 'full-reload', 'error'])
+const isUpdate = (entry: Pick<LogEntry, 'source' | 'type'>) =>
+  entry.source === 'vite' && UPDATE_TYPES.has(entry.type)
 
 const read = { readOnlyHint: true }
 const write = { readOnlyHint: false }
@@ -72,6 +104,18 @@ export function createMcpServer(hub: Hub, options: McpOptions = {}): McpServer {
     { name: 'tanstack-devtools-mcp', version: '0.0.0' },
     { instructions },
   )
+
+  /** Waits for the page to settle and for its entries to reach the server. */
+  const settle = async (target: Session, timeoutMs: number) => {
+    const result = (await hub.call(
+      target,
+      'page.wait',
+      { timeoutMs },
+      timeoutMs + 5000,
+    )) as { idle: boolean; waitedMs: number; lastSeq: number }
+    await hub.caughtUp(target, result.lastSeq)
+    return { idle: result.idle, waitedMs: result.waitedMs }
+  }
 
   server.registerTool(
     'list_sessions',
@@ -101,10 +145,80 @@ export function createMcpServer(hub: Hub, options: McpOptions = {}): McpServer {
   )
 
   server.registerTool(
+    'overview',
+    {
+      description:
+        'The page in one call: URL, matched routes, the query cache by status with what is fetching or failed, mutations, pending requests, and the latest problems from the log. Start here.',
+      inputSchema: { session },
+      annotations: read,
+    },
+    ({ session: id }) =>
+      guard(async () => {
+        const target = hub.resolve(id)
+        const live = target.connected
+          ? ((await hub.call(target, 'page.overview')) as Record<string, unknown>)
+          : {
+              url: target.info.url,
+              title: target.info.title,
+              note: 'The page is closed. This is its recorded log only.',
+            }
+        const problems = target.entries.filter(isProblem)
+        const bySource: Record<string, number> = {}
+        for (const entry of target.entries) {
+          bySource[entry.source] = (bySource[entry.source] ?? 0) + 1
+        }
+        return {
+          session: target.info.id,
+          connected: target.connected,
+          ...live,
+          log: { lastEntry: lastEntry(target), bySource },
+          problems: {
+            total: problems.length,
+            latest: problems.slice(-5).map(row),
+          },
+        }
+      }),
+  )
+
+  server.registerTool(
+    'diagnose',
+    {
+      description:
+        'Reads the log and the live page for things that look wrong: build errors, uncaught errors, failed requests, failed queries and routes, queries refetching in a loop, the same request sent several times at once, hydration mismatches, and the slowest queries, requests and navigations. Each finding carries its evidence.',
+      inputSchema: {
+        session,
+        after: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe('Only look at entries numbered above this.'),
+      },
+      annotations: read,
+    },
+    ({ session: id, after }) =>
+      guard(async () => {
+        const target = hub.resolve(id)
+        const live = target.connected
+          ? await hub.call(target, 'page.overview').catch(() => null)
+          : null
+        const entries =
+          after === undefined
+            ? target.entries
+            : target.entries.filter((entry) => entry.n > after)
+        return {
+          session: target.info.id,
+          lastEntry: lastEntry(target),
+          ...diagnose(entries, live as any, target.dropped),
+        }
+      }),
+  )
+
+  server.registerTool(
     'list_queries',
     {
       description:
-        'TanStack Query cache: one row per query with its hash, key, status, fetch status, staleness, observer count and error. No data; use get_query for that.',
+        'TanStack Query cache: one row per query with its hash, status and observer count. A row leaves out what is at its usual value: `fetch` appears when not idle, `stale`, `invalidated` and `disabled` only when true. Past ten queries, `families` counts them by the first two key segments. No data; use get_query for that.',
       inputSchema: {
         session,
         status: z.enum(['pending', 'error', 'success']).optional(),
@@ -114,7 +228,7 @@ export function createMcpServer(hub: Hub, options: McpOptions = {}): McpServer {
           .string()
           .optional()
           .describe('Substring of the query hash, which is the JSON of the key.'),
-        limit: z.number().int().min(1).max(500).optional(),
+        limit: z.number().int().min(1).max(500).optional().describe('Default 50.'),
       },
       annotations: read,
     },
@@ -126,16 +240,41 @@ export function createMcpServer(hub: Hub, options: McpOptions = {}): McpServer {
     'get_query',
     {
       description:
-        'One query with its data and error. Large values are cut at `depth` levels, 50 items per container and 2000 characters per string.',
+        'One query: its key, data and error, and `usedAt`, the places in the source that created or observe it. Large data is cut at `depth` levels, 50 items per container and 2000 characters per string; pass `path` to read a subtree in full.',
       inputSchema: {
         session,
         queryHash: z.string().describe('From list_queries.'),
+        path,
         depth: z.number().int().min(1).max(12).optional(),
       },
       annotations: read,
     },
     ({ session: id, ...args }) =>
-      guard(() => hub.call(hub.resolve(id), 'query.get', args)),
+      guard(async () => {
+        const { sites, ...query } = (await hub.call(
+          hub.resolve(id),
+          'query.get',
+          args,
+        )) as { sites: Array<Array<Frame>> } & Record<string, unknown>
+        const usedAt: Array<string> = []
+        for (const frames of sites) {
+          const places = await hub.resolveFrames(frames)
+          if (places.length > 0) usedAt.push(places.join(' < '))
+        }
+        return { ...query, usedAt }
+      }),
+  )
+
+  server.registerTool(
+    'diff_query',
+    {
+      description:
+        "What the last change to a query's data changed: one row per path, with the value before and after. Covers changes since the page connected.",
+      inputSchema: { session, queryHash: z.string() },
+      annotations: read,
+    },
+    ({ session: id, ...args }) =>
+      guard(() => hub.call(hub.resolve(id), 'query.diff', args)),
   )
 
   server.registerTool(
@@ -175,38 +314,52 @@ export function createMcpServer(hub: Hub, options: McpOptions = {}): McpServer {
     'list_routes',
     {
       description:
-        'Every route the router knows: id, full path, parent, and whether it has a loader, beforeLoad or search validation.',
-      inputSchema: { session },
+        'The routes the router knows: id, full path where it differs, and `has` listing loader, beforeLoad or search validation. Use `contains` on a large app.',
+      inputSchema: {
+        session,
+        contains: z
+          .string()
+          .optional()
+          .describe('Substring of the route id or full path.'),
+        limit: z.number().int().min(1).max(1000).optional().describe('Default 100.'),
+      },
       annotations: read,
     },
-    ({ session: id }) => guard(() => hub.call(hub.resolve(id), 'router.routes')),
+    ({ session: id, ...args }) =>
+      guard(() => hub.call(hub.resolve(id), 'router.routes', args)),
   )
 
   server.registerTool(
     'list_events',
     {
       description:
-        'The recorded log, oldest first: query and mutation cache events, router navigation events, console errors and warnings, and TanStack Devtools bus events. Without `after` it returns the newest `limit` matches; with `after` it returns the first `limit` matches numbered above it. Answers from the server copy, so it works after a reload.',
+        'The recorded timeline, oldest first. Sources: query and mutation (cache events, with `ms` for a finished fetch), router (navigation), network (fetch and XHR with status and `ms`), console (errors, warnings, uncaught errors), vite (file changes, hot updates, reloads, build errors) and bus (TanStack Devtools events). `from` is the place in the source an entry came from. Without `after` it returns the newest `limit` matches; with `after` it returns the first `limit` matches numbered above it.',
       inputSchema: {
         session,
         source: z
-          .enum(['query', 'mutation', 'router', 'console', 'bus'])
+          .enum(['query', 'mutation', 'router', 'network', 'console', 'vite', 'bus'])
           .optional(),
         type: z
           .string()
           .optional()
-          .describe('For example fetch, success, error, onResolved, warn.'),
+          .describe(
+            'For example fetch, success, error, onResolved, failed, warn, uncaught, hmr-update.',
+          ),
         key: z
           .string()
           .optional()
-          .describe('Exact query hash, mutation id or pathname.'),
+          .describe('Exact query hash, mutation id, pathname or file.'),
         contains: z.string().optional().describe('Substring of the summary.'),
+        problems: z
+          .boolean()
+          .optional()
+          .describe('Only errors and failures, from every source.'),
         after: z.number().int().min(0).optional(),
         limit: z.number().int().min(1).max(500).optional(),
       },
       annotations: read,
     },
-    ({ session: id, source, type, key, contains, after, limit = 50 }) =>
+    ({ session: id, source, type, key, contains, problems, after, limit = 50 }) =>
       guard(() => {
         const target = hub.resolve(id)
         const matches = target.entries.filter(
@@ -215,6 +368,7 @@ export function createMcpServer(hub: Hub, options: McpOptions = {}): McpServer {
             (type === undefined || entry.type === type) &&
             (key === undefined || entry.key === key) &&
             (contains === undefined || entry.summary.includes(contains)) &&
+            (problems !== true || isProblem(entry)) &&
             (after === undefined || entry.n > after),
         )
         const shown =
@@ -222,7 +376,7 @@ export function createMcpServer(hub: Hub, options: McpOptions = {}): McpServer {
         return {
           session: target.info.id,
           matched: matches.length,
-          dropped: target.dropped,
+          ...(target.dropped > 0 ? { dropped: target.dropped } : {}),
           lastEntry: lastEntry(target),
           entries: shown.map(row),
         }
@@ -232,7 +386,8 @@ export function createMcpServer(hub: Hub, options: McpOptions = {}): McpServer {
   server.registerTool(
     'get_event',
     {
-      description: 'One recorded event with its detail.',
+      description:
+        'One recorded event in full: its detail, and `at`, the app frames it came from, most recent call first.',
       inputSchema: { session, n: z.number().int().min(1) },
       annotations: read,
     },
@@ -240,7 +395,13 @@ export function createMcpServer(hub: Hub, options: McpOptions = {}): McpServer {
       guard(() => {
         const entry = hub.resolve(id).entries.find((e) => e.n === n)
         if (!entry) throw new Error(`Entry ${n} is not in the log.`)
-        return { ...row(entry), detail: entry.detail ?? null }
+        const { from: _from, ...rest } = shape(entry, entry.summary)
+        return {
+          ...rest,
+          ...(entry.key !== undefined ? { key: entry.key } : {}),
+          ...(entry.at ? { at: entry.at } : {}),
+          detail: entry.detail ?? null,
+        }
       }),
   )
 
@@ -268,7 +429,7 @@ export function createMcpServer(hub: Hub, options: McpOptions = {}): McpServer {
     'wait_for_idle',
     {
       description:
-        'Waits until no query is fetching, no mutation is running and the router is idle, or until the timeout. With `after`, also returns the events recorded since that entry number.',
+        'Waits until no query is fetching, no mutation is running, the router is idle and no request is in flight, or until the timeout. With `after`, also returns the events recorded since that entry number.',
       inputSchema: {
         session,
         timeoutMs: z.number().int().min(0).max(30_000).optional(),
@@ -279,21 +440,104 @@ export function createMcpServer(hub: Hub, options: McpOptions = {}): McpServer {
     ({ session: id, timeoutMs = 5000, after }) =>
       guard(async () => {
         const target = hub.resolve(id)
-        const result = (await hub.call(
-          target,
-          'page.wait',
-          { timeoutMs },
-          timeoutMs + 5000,
-        )) as { idle: boolean; waitedMs: number; lastEntry: number }
-        if (after === undefined) return result
-        // The page's entries arrive in batches; give the last one time to land.
-        const deadline = Date.now() + 500
-        while (lastEntry(target) < result.lastEntry && Date.now() < deadline) {
-          await new Promise((resolve) => setTimeout(resolve, 10))
-        }
+        const result = await settle(target, timeoutMs)
+        const out = { ...result, lastEntry: lastEntry(target) }
+        if (after === undefined) return out
         return {
-          ...result,
+          ...out,
           entries: target.entries.filter((e) => e.n > after).slice(0, 200).map(row),
+        }
+      }),
+  )
+
+  server.registerTool(
+    'wait_for_update',
+    {
+      description:
+        'Call this after editing a file. Waits for Vite to react (a hot update, a full reload or a build error), then for the page to settle, and returns what happened: `update` says which, `files` what changed, `problems` the errors that followed, `entries` the timeline. Uses an update from the last `sinceMs` if one already arrived, so it is safe to call a moment after the edit. Follows the page across a reload. Needs the Vite plugin.',
+      inputSchema: {
+        session,
+        after: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe(
+            'Entry number noted before the edit. Without it, the last `sinceMs` are used.',
+          ),
+        sinceMs: z.number().int().min(0).max(120_000).optional().describe('Default 15000.'),
+        timeoutMs: z.number().int().min(0).max(60_000).optional().describe('Default 10000.'),
+      },
+      annotations: read,
+    },
+    ({ session: id, after, sinceMs = 15_000, timeoutMs = 10_000 }) =>
+      guard(async () => {
+        const began = Date.now()
+        const deadline = began + timeoutMs
+        const since = began - sinceMs
+        const first = hub.resolve(id)
+        const fresh = (entry: LogEntry) =>
+          after === undefined ? entry.t >= since : entry.n > after
+
+        const findTrigger = () => first.entries.findLast((e) => isUpdate(e) && fresh(e))
+        const reloadedInto = () =>
+          [...hub.sessions.values()]
+            .filter((s) => s !== first && s.connected && s.connectedAt > first.connectedAt)
+            .sort((a, b) => b.connectedAt - a.connectedAt)[0]
+
+        // A change Vite saw but answered with nothing, for longer than this,
+        // was to a file the browser does not load.
+        const QUIET_AFTER_CHANGE_MS = 2000
+        const unanswered = () => {
+          const change = first.entries.findLast(
+            (e) => e.source === 'vite' && e.type === 'change' && fresh(e),
+          )
+          return change !== undefined && Date.now() - change.t > QUIET_AFTER_CHANGE_MS
+        }
+        let trigger = findTrigger()
+        while (!trigger && !reloadedInto() && !unanswered() && Date.now() < deadline) {
+          await sleep(25)
+          trigger = findTrigger()
+        }
+        // A reload closes the first page; give the next one time to connect.
+        let target = first
+        if (trigger?.type === 'full-reload' || (!trigger && reloadedInto())) {
+          while (!reloadedInto() && Date.now() < deadline) await sleep(25)
+          target = reloadedInto() ?? first
+        }
+        const reloaded = target !== first
+
+        let idle: boolean | undefined
+        if (target.connected && trigger?.type !== 'error') {
+          const remaining = Math.max(500, deadline - Date.now())
+          idle = (await settle(target, remaining).catch(() => undefined))?.idle
+        }
+
+        const before = first.entries.filter(fresh)
+        const entries = reloaded ? [...before, ...target.entries] : before
+        const changes = entries.filter(
+          (e) => e.source === 'vite' && (e.type === 'change' || isUpdate(e)),
+        )
+        const update = trigger?.type ?? (reloaded ? 'full-reload' : 'none')
+        return {
+          update,
+          ...(update === 'none'
+            ? {
+                note: changes.some((e) => e.type === 'change')
+                  ? 'Vite saw the file change but sent the browser no update. The file is probably not loaded by the page: server-only code, a config file, or a module nothing imports.'
+                  : `Vite reported no change to a module of the app, hot update, reload or build error in ${Date.now() - began} ms. Check that the file was saved, that something imports it, and that the dev server runs with this plugin.`,
+              }
+            : {}),
+          files: [...new Set(changes.map((e) => e.key).filter(Boolean))],
+          session: target.info.id,
+          ...(reloaded ? { reloaded: true } : {}),
+          ...(idle !== undefined ? { idle } : {}),
+          lastEntry: lastEntry(target),
+          problems: entries.filter(isProblem).slice(-20).map((entry) => ({
+            ...row(entry),
+            ...(entry.source === 'vite' ? { detail: entry.detail ?? null } : {}),
+          })),
+          entries: entries.slice(-150).map(row),
         }
       }),
   )

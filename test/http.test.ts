@@ -80,7 +80,7 @@ describe('/mcp', () => {
     page.send(
       JSON.stringify({
         kind: 'entries',
-        entries: [{ n: 1, t: 0, source: 'console', type: 'warn', summary: 'careful' }],
+        entries: [{ seq: 1, t: 0, source: 'console', type: 'warn', summary: 'careful' }],
       }),
     )
 
@@ -90,8 +90,11 @@ describe('/mcp', () => {
       const { tools } = await client.listTools()
       expect(tools.map((tool) => tool.name)).toEqual([
         'list_sessions',
+        'overview',
+        'diagnose',
         'list_queries',
         'get_query',
+        'diff_query',
         'list_mutations',
         'get_router_state',
         'list_routes',
@@ -99,10 +102,11 @@ describe('/mcp', () => {
         'get_event',
         'count_events',
         'wait_for_idle',
+        'wait_for_update',
         'list_page_tools',
         'call_page_tool',
       ])
-      expect(client.getInstructions()).toMatch(/Start with list_sessions/)
+      expect(client.getInstructions()).toMatch(/Start with overview/)
 
       await expect
         .poll(async () => {
@@ -115,7 +119,7 @@ describe('/mcp', () => {
         .toEqual([
           {
             n: 1,
-            at: '1970-01-01T00:00:00.000Z',
+            time: '00:00:00.000',
             source: 'console',
             type: 'warn',
             summary: 'careful',
