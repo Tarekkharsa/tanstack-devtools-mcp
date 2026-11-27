@@ -246,7 +246,14 @@ export const ROUTER_RULES: Array<Rule> = [
     docs: ROUTER_QUERY,
     check: (context) => {
       const added = context.by('query', 'added')
-      const fetched = new Set(context.by('query', 'fetch').map((e) => e.key))
+      // A fetch nothing on screen was reading is a prefetch for a later page,
+      // not data this route rendered without.
+      const fetched = new Set(
+        context
+          .by('query', 'fetch')
+          .filter((e) => detailOf<{ observers?: number }>(e).observers !== 0)
+          .map((e) => e.key),
+      )
       const findings = []
       for (const { end } of navigations(context).slice(-3)) {
         if (detailOf<{ initial?: boolean }>(end).initial === true) continue

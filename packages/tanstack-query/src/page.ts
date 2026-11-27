@@ -420,8 +420,13 @@ export function recordQuery(
         type,
         key,
         summary: `${key} ${memory.hasData ? 'refetching' : 'fetching'}`,
-        // For rules: a fetch of data the cache already holds.
-        ...(memory.hasData ? { detail: { refetch: true } } : {}),
+        // For rules: whether the cache already held data, and how many
+        // components were reading the query. None means code asked for it
+        // directly, as a prefetch does.
+        detail: {
+          ...(memory.hasData ? { refetch: true } : {}),
+          observers: safe(() => query.getObserversCount(), 0),
+        },
         frames: here(),
       })
       return

@@ -368,6 +368,31 @@ export function loopsightVite(options: LoopsightViteOptions = {}): Plugin {
       const logger = server.config.logger
       resolveFrame = sourceResolver(server)
 
+      // In middleware mode Vite has no HTTP server of its own. The app's
+      // server is known to it only when passed as `server.hmr.server`,
+      // which is also where Vite puts its own WebSocket.
+      const hmr = server.config.server.hmr
+      const http = server.httpServer ?? (typeof hmr === 'object' ? hmr.server : undefined)
+      /**
+       * Puts the page connection on the dev server the page came from, and
+       * returns the expression for its address. Same origin, so a strict
+       * `connect-src` in the app's content security policy allows it and an
+       * https page gets a secure socket.
+       */
+      const onDevServer = (): string | undefined => {
+        if (!http) return undefined
+        const path = base + SAME_SERVER_BRIDGE
+        const bridge = createBridge(hub, {
+          path,
+          sameOrigin: true,
+          hostAllowed: (host) => servedHost(server, host),
+          ...(serverOptions.origins ? { origins: serverOptions.origins } : {}),
+        })
+        http.on('upgrade', bridge.handle)
+        http.once('close', () => bridge.close())
+        return `(location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + ${JSON.stringify(path)}`
+      }
+
       if (standalone) {
         try {
           running = await startServer({ ...serverOptions, hub })
@@ -383,7 +408,9 @@ export function loopsightVite(options: LoopsightViteOptions = {}): Plugin {
           running = undefined
         }
         server.httpServer?.once('close', stop)
-        bridgeUrl = JSON.stringify(running.bridgeUrl)
+        // The port of our own stays for agents, and for pages no dev server
+        // serves; the page of this app connects through its own server.
+        bridgeUrl = onDevServer() ?? JSON.stringify(running.bridgeUrl)
         const print = server.printUrls.bind(server)
         const mcpUrl = running.mcpUrl
         server.printUrls = () => {
@@ -394,27 +421,13 @@ export function loopsightVite(options: LoopsightViteOptions = {}): Plugin {
       } else {
         // No port of our own: the page reaches the hub through the dev
         // server it was served from, and agents through Vite DevTools.
-        // In middleware mode Vite has no HTTP server of its own. The app's
-        // server is known to it only when passed as `server.hmr.server`,
-        // which is also where Vite puts its own WebSocket.
-        const hmr = server.config.server.hmr
-        const http = server.httpServer ?? (typeof hmr === 'object' ? hmr.server : undefined)
-        if (!http) {
+        bridgeUrl = onDevServer()
+        if (!http || bridgeUrl === undefined) {
           logger.warn(
             `[${NAME}] \`standalone: false\` has no HTTP server to put the page connection on. In middleware mode, pass your server as \`server.hmr.server\`. Nothing is connected.`,
           )
           return
         }
-        const path = base + SAME_SERVER_BRIDGE
-        const bridge = createBridge(hub, {
-          path,
-          sameOrigin: true,
-          hostAllowed: (host) => servedHost(server, host),
-          ...(serverOptions.origins ? { origins: serverOptions.origins } : {}),
-        })
-        http.on('upgrade', bridge.handle)
-        http.once('close', () => bridge.close())
-        bridgeUrl = `(location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + ${JSON.stringify(path)}`
         const warnIfUnserved = () => {
           // The DevTools hook has run by now if it was going to.
           setTimeout(() => {

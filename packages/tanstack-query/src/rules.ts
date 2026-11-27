@@ -150,7 +150,20 @@ export const QUERY_RULES: Array<Rule> = [
     id: 'query/fetch-loop',
     check: ({ by }) => {
       const findings = []
-      for (const [key, list] of groups(by('query', 'fetch'), (entry) => entry.key ?? '')) {
+      const invalidations = by('query', 'invalidate')
+      const writes = by('mutation', 'success', 'error')
+      // A refetch that a finished write asked for is the app doing its job,
+      // however fast someone presses the button.
+      const afterWrite = (fetch: LogEntry) =>
+        invalidations.some(
+          (entry) =>
+            entry.key === fetch.key &&
+            entry.t <= fetch.t &&
+            fetch.t - entry.t < 5000 &&
+            writes.some((write) => write.t <= entry.t && entry.t - write.t < 2000),
+        )
+      const fetches = by('query', 'fetch').filter((fetch) => !afterWrite(fetch))
+      for (const [key, list] of groups(fetches, (entry) => entry.key ?? '')) {
         const run = burst(list, 10_000)
         if (run.length < 4) continue
         findings.push({

@@ -42,6 +42,54 @@ async function asDevtools(plugin: ReturnType<typeof loopsight>) {
   return tools
 }
 
+describe('with a port of its own (the default)', () => {
+  it('still connects the page through the dev server it came from', async () => {
+    // A strict `connect-src 'self'` in the app's content security policy
+    // refuses a socket to any other port, and reports each attempt.
+    const app = createHttpServer()
+    await new Promise<void>((resolve) => app.listen(0, '127.0.0.1', resolve))
+    const port = (app.address() as AddressInfo).port
+    closers.push(() => new Promise((resolve) => { app.closeAllConnections(); app.close(resolve) }))
+    const vite = await createServer({
+      configFile: false,
+      root: import.meta.dirname,
+      logLevel: 'silent',
+      appType: 'custom',
+      optimizeDeps: { noDiscovery: true, include: [] },
+      server: { middlewareMode: true, hmr: { server: app }, ws: false },
+      plugins: [loopsight({ port: 47991 })],
+    })
+    closers.push(() => vite.close())
+
+    const entry = await vite.pluginContainer.load('\0loopsight:entry')
+    const code = typeof entry === 'string' ? entry : (entry as { code: string }).code
+    expect(code).toContain(
+      `url: (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + "/__loopsight/bridge",`,
+    )
+
+    const page = await open(`ws://127.0.0.1:${port}/__loopsight/bridge`, `http://127.0.0.1:${port}`)
+    closers.push(() => page.close())
+    page.send(hello)
+    // The agent reads that page on the port the plugin opened.
+    const sessions = async () => {
+      const response = await fetch('http://127.0.0.1:47991/mcp', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_sessions', arguments: {} } }),
+      })
+      const text = await response.text()
+      const data = text.split('\n').find((line) => line.startsWith('data: '))
+      return JSON.parse(JSON.parse(data ? data.slice(6) : text).result.content[0].text).sessions
+    }
+    await expect.poll(async () => (await sessions()).length).toBe(1)
+    expect((await sessions())[0]).toMatchObject({ id: 'page-1', connected: true })
+    // The dev server refuses a page from elsewhere.
+    await expect(
+      open(`ws://127.0.0.1:${port}/__loopsight/bridge`, 'https://evil.example'),
+    ).rejects.toThrow(/403/)
+  })
+})
+
 describe('standalone: false', () => {
   it('puts the page connection on the app server in middleware mode, and opens no port', async () => {
     // An app that owns the HTTP server and mounts Vite as middleware.

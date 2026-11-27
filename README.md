@@ -382,7 +382,7 @@ To have that route as the only endpoint, turn this package's own off:
 loopsight({ standalone: false })
 ```
 
-The page then connects through the dev server it was served from, and no second port opens. In Vite's middleware mode the dev server has no HTTP server of its own, so pass your app's server as `server.hmr.server`, which is where Vite puts its own WebSocket too.
+No second port opens then. The page connects through the dev server it was served from in both modes, so an app with a strict `connect-src` in its content security policy needs no exception and an https page gets a secure socket. In Vite's middleware mode the dev server has no HTTP server of its own, so pass your app's server as `server.hmr.server`, which is where Vite puts its own WebSocket too.
 
 | | This package's endpoint | Vite DevTools' route |
 | --- | --- | --- |
@@ -415,7 +415,9 @@ The server listens on `127.0.0.1` only and has no option to listen elsewhere.
 - Both routes refuse a `Host` header that is not a loopback name, which stops DNS rebinding.
 - `/bridge` accepts WebSocket connections from loopback origins and the ones you list in `origins`.
 
-With `standalone: false` there is no server of this package's own. The page's WebSocket goes to the dev server, which accepts it from loopback origins, from the page's own origin when the `Host` is one the Vite config allows (`server.allowedHosts`), and from the origins you list. Who may call the tools is then decided by Vite DevTools' route.
+With the Vite plugin the page's WebSocket goes to the dev server, which accepts it from loopback origins, from the page's own origin when the `Host` is one the Vite config allows (`server.allowedHosts`), and from the origins you list.
+
+With `standalone: false` there is no server of this package's own, and who may call the tools is decided by Vite DevTools' route.
 
 There is no token. Any process on your machine can connect, as it can to the Vite dev server. Query data, loader data and request URLs are sent to whoever connects, so do not run it against data you would not show a local process.
 

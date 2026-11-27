@@ -430,6 +430,14 @@ describe('TanStack Router rules', () => {
     inLoader.add(1012, 'query', 'fetch', '["b"] fetching', { key: '["b"]' })
     inLoader.add(1100, 'router', 'onResolved', '/a → /b', { key: '/b' })
     expect(check('router/fetch-after-render', inLoader.entries)).toEqual([])
+
+    // The page warming the next page's data, with no component reading it yet.
+    const prefetch = log()
+    prefetch.add(1000, 'router', 'onBeforeNavigate', '/a → /b', { key: '/b' })
+    prefetch.add(1100, 'router', 'onResolved', '/a → /b', { key: '/b' })
+    prefetch.add(1150, 'query', 'added', '["c"] added', { key: '["c"]' })
+    prefetch.add(1152, 'query', 'fetch', '["c"] fetching', { key: '["c"]', detail: { observers: 0 } })
+    expect(check('router/fetch-after-render', prefetch.entries)).toEqual([])
   })
 
   it('loader-refetch-blocks: a loader waiting on data it already had', () => {
@@ -638,6 +646,24 @@ describe('messages the libraries print', () => {
     // With no facts about the query, the plain finding is all there is.
     expect(diagnose(entries, null).findings.map((finding) => finding.title)).toEqual([
       'A query fetched 5 times within 10 s',
+    ])
+  })
+
+  it('does not call refetches after separate writes a loop', () => {
+    const build = (withWrites: boolean) => {
+      const { entries, add } = log()
+      for (let index = 0; index < 5; index++) {
+        const at = 1000 + index * 1500
+        if (withWrites) add(at, 'mutation', 'success', 'mutation #1 success', { key: String(index) })
+        add(at + 20, 'query', 'invalidate', '["saved"] invalidated', { key: '["saved"]' })
+        add(at + 25, 'query', 'fetch', '["saved"] refetching', { key: '["saved"]' })
+      }
+      return entries
+    }
+    expect(check('query/fetch-loop', build(true))).toEqual([])
+    // Invalidating with no write behind it, over and over, is still a loop.
+    expect(check('query/fetch-loop', build(false))).toMatchObject([
+      { title: 'A query fetched 5 times within 10 s' },
     ])
   })
 

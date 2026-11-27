@@ -63,7 +63,8 @@ try {
     const entry = await fetch(new URL('@id/__x00__loopsight:entry', appUrl))
     assert.equal(entry.status, 200)
     const code = await entry.text()
-    assert.match(code, /url: "ws:\/\/127\.0\.0\.1:4791\/bridge",/)
+    // Through the dev server the page came from, not the tool's own port.
+    assert.match(code, /url: \(location\.protocol === 'https:' \? 'wss:\/\/' : 'ws:\/\/'\) \+ location\.host \+ "\/__loopsight\/bridge",/)
     // The example has the router and Query, and neither Start nor the
     // Devtools event bus, so two of the four built-in sources are sent.
     // They and the core come from the plugin: the app installs nothing.
