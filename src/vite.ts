@@ -2,10 +2,11 @@ import { readFileSync } from 'node:fs'
 import { dirname, join, posix, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { TraceMap, originalPositionFor } from '@jridgewell/trace-mapping'
+import { registerOnAgentHost } from './server/devframe.js'
 import { startServer } from './server/http.js'
+import { Hub } from './server/hub.js'
 import type { Plugin, ViteDevServer } from 'vite'
 import type { Frame } from './protocol.js'
-import type { Hub } from './server/hub.js'
 import type { RunningServer, ServerOptions } from './server/http.js'
 
 export interface TanStackDevtoolsMcpOptions
@@ -234,8 +235,12 @@ export function tanstackDevtoolsMcp(
   const { inject = true, ...serverOptions } = options
   let running: RunningServer | undefined
   let base = '/'
+  // Made here, before any server exists, so the standalone endpoint and the
+  // Vite DevTools route below serve the same sessions and the same log.
+  let resolveFrame: ((frame: Frame) => Promise<string | undefined>) | undefined
+  const hub = new Hub({ ...serverOptions, resolveFrame: (frame) => resolveFrame?.(frame) })
 
-  return {
+  const plugin: Plugin = {
     name: 'tanstack-devtools-mcp',
     apply: 'serve',
 
@@ -245,10 +250,8 @@ export function tanstackDevtoolsMcp(
 
     async configureServer(server) {
       try {
-        running = await startServer({
-          ...serverOptions,
-          resolveFrame: sourceResolver(server),
-        })
+        resolveFrame = sourceResolver(server)
+        running = await startServer({ ...serverOptions, hub })
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error)
         server.config.logger.warn(
@@ -323,6 +326,17 @@ export function tanstackDevtoolsMcp(
       },
     },
   }
+
+  // When Vite DevTools is enabled it calls this hook, and the same tools are
+  // also served from its MCP route, next to its own and other plugins'.
+  return Object.assign(plugin, {
+    devtools: {
+      async setup(context: { agent?: Parameters<typeof registerOnAgentHost>[0] }) {
+        if (!context.agent) return
+        await registerOnAgentHost(context.agent, hub, serverOptions)
+      },
+    },
+  })
 }
 
 export default tanstackDevtoolsMcp

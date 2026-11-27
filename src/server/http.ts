@@ -16,6 +16,8 @@ export interface ServerOptions extends HubOptions, McpOptions {
    * `https://myapp.test`. Loopback origins are always allowed.
    */
   origins?: Array<string>
+  /** A hub made by the caller, to share it with another way of serving the tools. */
+  hub?: Hub
 }
 
 export interface RunningServer {
@@ -94,7 +96,7 @@ function readBody(request: IncomingMessage): Promise<unknown> {
  * the dev server itself.
  */
 export function startServer(options: ServerOptions = {}): Promise<RunningServer> {
-  const hub = new Hub(options)
+  const hub = options.hub ?? new Hub(options)
   const extraOrigins = new Set(options.origins ?? [])
 
   const originAllowed = (origin: string | undefined) => {

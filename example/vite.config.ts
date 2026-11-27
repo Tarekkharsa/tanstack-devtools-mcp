@@ -39,6 +39,8 @@ function fakeApi(): Plugin {
 }
 
 export default defineConfig({
+  // Vite DevTools is optional. With it on, the same tools are also on its MCP route.
+  devtools: process.env.VITE_DEVTOOLS === '1',
   plugins: [
     react(),
     fakeApi(),
