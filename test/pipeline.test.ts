@@ -583,6 +583,22 @@ describe('network', () => {
       ['aborted', 'GET https://api.test/slow → aborted'],
     ])
     expect((await call('list_events', { key: 'serverFn:getCart' })).matched).toBe(1)
+
+    // Two long URLs that share their first 300 characters are different
+    // requests; the same URL twice is one.
+    const long = `https://api.test/rail?filters=${'x'.repeat(400)}`
+    await Promise.all([fetch(`${long}&id=611`), fetch(`${long}&id=556`), fetch(`${long}&id=611`)])
+    const rails = (await call('wait_for_idle', { after: 2 })).entries
+    expect(rails).toHaveLength(3)
+    // A row is cut in the middle, so the status at the end survives.
+    expect(rails[0].summary).toMatch(/^GET https:\/\/api\.test\/rail\?filters=x+… → 200$/)
+    expect(rails[0].summary).toHaveLength(201)
+    expect(rails[0].summary).toBe(rails[1].summary)
+    const whole = await Promise.all(rails.map((e: any) => call('get_event', { n: e.n })))
+    expect(whole[0].summary).toMatch(/…\(\+\d+ chars\) → 200$/)
+    const ids = whole.map((event: any) => event.detail.id)
+    expect(ids[0]).toBe(ids[2])
+    expect(ids[0]).not.toBe(ids[1])
     expect((await call('list_events', { problems: true })).matched).toBe(0)
   })
 

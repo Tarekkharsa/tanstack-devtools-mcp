@@ -201,6 +201,20 @@ export function recordConsole(record: Recorder): () => void {
 
 /** Requests Vite makes for itself, which are not the app's. */
 const VITE_REQUEST = /^\/(?:@vite|@id|@fs|@react-refresh|__vite|node_modules\/\.vite)/
+/** FNV-1a, as hex: enough to tell two URLs apart without keeping them. */
+function fingerprint(text: string): string {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < text.length; index++) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return `${(hash >>> 0).toString(16)}.${text.length}`
+}
+
+function cut(text: string, chars: number): string {
+  return text.length <= chars ? text : `${text.slice(0, chars)}…(+${text.length - chars} chars)`
+}
+
 const SERVER_FN = /\/_serverFn\/([A-Za-z0-9_-]{16,})$/
 
 /**
@@ -252,20 +266,24 @@ export function recordNetwork(record: Recorder): NetworkRecorder {
       const url = new URL(raw, location.href)
       const same = url.origin === location.origin
       if (same && VITE_REQUEST.test(url.pathname)) return undefined
+      // The whole URL, as a short fingerprint: what is shown is cut short,
+      // and two requests are the same only when all of it matches.
+      const id = fingerprint(url.href)
       const fn = same ? serverFnName(url.pathname) : undefined
       if (fn) {
         return {
           key: `serverFn:${fn.name}`,
-          shown: `serverFn ${fn.name}${fn.file ? ` (${fn.file})` : ''}${url.search ? ` ${url.search.slice(0, 200)}` : ''}`,
+          shown: `serverFn ${fn.name}${fn.file ? ` (${fn.file})` : ''}${url.search ? ` ${cut(url.search, 60)}` : ''}`,
+          id,
         }
       }
-      const shown = (same ? '' : url.origin) + url.pathname + url.search
       return {
         key: url.pathname,
-        shown: shown.length > 300 ? `${shown.slice(0, 300)}…` : shown,
+        shown: cut((same ? '' : url.origin) + url.pathname + url.search, 300),
+        id,
       }
     } catch {
-      return { key: raw.slice(0, 120), shown: raw.slice(0, 300) }
+      return { key: raw.slice(0, 120), shown: raw.slice(0, 300), id: fingerprint(raw) }
     }
   }
 
@@ -278,7 +296,7 @@ export function recordNetwork(record: Recorder): NetworkRecorder {
     id: number,
     kind: 'fetch' | 'xhr',
     method: string,
-    target: { key: string; shown: string },
+    target: { key: string; shown: string; id: string },
     outcome: { status: number } | { failure: string; aborted?: boolean },
     frames: Array<Frame>,
   ) => {
@@ -295,7 +313,7 @@ export function recordNetwork(record: Recorder): NetworkRecorder {
       key: target.key,
       summary: `${method} ${target.shown} → ${aborted ? 'aborted' : failed ? outcome.failure : status}`,
       ...(dur !== undefined ? { dur } : {}),
-      detail: { kind, ...(failed ? {} : { status }) },
+      detail: { kind, ...(failed ? {} : { status }), id: `${method} ${target.id}` },
       ...(frames.length > 0 ? { frames } : {}),
     })
   }

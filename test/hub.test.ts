@@ -207,6 +207,23 @@ describe('diagnose', () => {
     expect(diagnose(fixed, null).ok).toBe(true)
   })
 
+  it('compares whole URLs, not the shortened text, when the page fingerprints them', () => {
+    const call = (id: string) =>
+      entry({
+        source: 'network',
+        type: 'ok',
+        key: 'serverFn:getOffers',
+        summary: 'GET serverFn getOffers ?payload=%7B%22t%22…(+700 chars) → 200',
+        dur: 500,
+        detail: { kind: 'fetch', status: 200, id },
+      })
+    // Same visible text, different URLs: two rails asking for different things.
+    expect(diagnose([call('GET aaa.900'), call('GET bbb.900')], null).findings).toEqual([])
+    const same = diagnose([call('GET aaa.900'), call('GET aaa.900')], null).findings
+    expect(same.map((f) => f.title)).toEqual(['The same request was in flight 2 times at once'])
+    expect(same[0]!.evidence[0]).toBe('GET serverFn getOffers ?payload=%7B%22t%22…(+700 chars)')
+  })
+
   it('does not call two POSTs to one URL the same request', () => {
     const posts = Array.from({ length: 3 }, () =>
       entry({ source: 'network', type: 'ok', key: '/api/rates', summary: 'POST /api/rates → 200', dur: 500 }),

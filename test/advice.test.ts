@@ -83,7 +83,7 @@ describe('the catalogue', () => {
       expect(item.docs.label, item.id).not.toBe('')
       expect(item.docs.at, item.id).toMatch(/^(https:\/\/|@[\w-]+\/[\w-]+: )/)
     }
-    expect(RULES).toHaveLength(29)
+    expect(RULES).toHaveLength(30)
     expect(KNOWN_MESSAGES).toHaveLength(25)
   })
 })
@@ -260,6 +260,40 @@ describe('TanStack Query rules', () => {
     hot.add(900, 'vite', 'hmr-update', 'hot update: src/main.tsx')
     hot.add(1000, 'query', 'replaced', 'the app created a new QueryClient')
     expect(check('query/client-recreated', hot.entries)).toEqual([])
+  })
+
+  it('restarted-on-mount: a request in flight cancelled and sent again', () => {
+    const { entries, add } = log()
+    add(1000, 'query', 'fetch', '["offers",7] fetching', { key: '["offers",7]', at: ['prefetch src/lib/prefetch.ts:9:1'] })
+    add(1380, 'query', 'fetch', '["offers",7] fetching', { key: '["offers",7]' })
+    add(1386, 'network', 'aborted', 'GET /api/offers/7 → aborted', { dur: 385 })
+    add(3070, 'network', 'ok', 'GET /api/offers/7 → 200', { dur: 1686 })
+    add(3071, 'query', 'success', '["offers",7] success', { key: '["offers",7]', dur: 1694 })
+    expect(check('query/restarted-on-mount', entries)).toMatchObject([
+      {
+        severity: 'info',
+        title: '1 query had its request cancelled and sent again as the component mounted',
+        entries: [2],
+        evidence: [
+          '["offers",7]: cancelled after 385 ms — from prefetch src/lib/prefetch.ts:9:1',
+          '385 ms of requests thrown away in total',
+        ],
+      },
+    ])
+
+    // A fetch, its result, then a refetch: nothing was cancelled.
+    const normal = log()
+    normal.add(1000, 'query', 'fetch', '["a"] fetching', { key: '["a"]' })
+    normal.add(1200, 'query', 'success', '["a"] success', { key: '["a"]', dur: 200 })
+    normal.add(1300, 'query', 'fetch', '["a"] refetching', { key: '["a"]' })
+    normal.add(1305, 'network', 'aborted', 'GET /other → aborted', { dur: 5 })
+    expect(check('query/restarted-on-mount', normal.entries)).toEqual([])
+
+    // Two fetch events with no cancelled request: a retry, not a restart.
+    const retry = log()
+    retry.add(1000, 'query', 'fetch', '["a"] fetching', { key: '["a"]' })
+    retry.add(1400, 'query', 'fetch', '["a"] fetching', { key: '["a"]' })
+    expect(check('query/restarted-on-mount', retry.entries)).toEqual([])
   })
 
   it('serial-fetches: one query starting as another finishes', () => {

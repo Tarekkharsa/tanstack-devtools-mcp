@@ -62,12 +62,15 @@ const ROW_CHARS = 200
  * summary short enough that fifty rows stay readable. get_event has it whole.
  */
 export function row(entry: LogEntry) {
-  return shape(
-    entry,
-    entry.summary.length <= ROW_CHARS
-      ? entry.summary
-      : `${entry.summary.slice(0, ROW_CHARS)}…`,
-  )
+  return shape(entry, shorten(entry.summary))
+}
+
+/** Cuts the middle, so the outcome at the end (`→ 404`) is never lost. */
+function shorten(summary: string): string {
+  if (summary.length <= ROW_CHARS) return summary
+  const arrow = summary.lastIndexOf(' → ')
+  const tail = arrow > 0 && summary.length - arrow <= 60 ? summary.slice(arrow) : ''
+  return `${summary.slice(0, ROW_CHARS - tail.length)}…${tail}`
 }
 
 function shape(entry: LogEntry, summary: string) {

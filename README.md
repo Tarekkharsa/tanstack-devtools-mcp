@@ -149,6 +149,7 @@ From the TanStack Query guides:
 - `gcTime: 0` on server-rendered queries
 - a `QueryClient` recreated during one page load
 - a query that starts only when another finishes
+- a request cancelled and sent again as its component mounts, which is React StrictMode's double mount in development and not a production cost
 
 From the skills shipped in `@tanstack/react-router` and `@tanstack/router-core`:
 

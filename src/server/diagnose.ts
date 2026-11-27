@@ -199,7 +199,8 @@ export function diagnose(
     by('network', 'ok', 'error').filter(
       (e) => e.dur !== undefined && /^(?:GET|HEAD) /.test(e.summary),
     ),
-    (e) => e.summary.replace(/ → .*$/, ''),
+    // The page fingerprints the whole URL; the summary shows only its start.
+    (e) => (e.detail as { id?: string } | undefined)?.id ?? e.summary.replace(/ → .*$/, ''),
   )) {
     const together = overlapping(list)
     if (together.length < 2) continue
@@ -207,7 +208,7 @@ export function diagnose(
       severity: 'warning',
       title: `The same request was in flight ${together.length} times at once`,
       entries: numbers(together),
-      evidence: [clip(summary) + where(together.at(-1)!)],
+      evidence: [clip(together.at(-1)!.summary.replace(/ → .*$/, '')) + where(together.at(-1)!)],
       hint: 'Callers that share a query key share one request.',
     })
     if (findings.filter((f) => f.title.startsWith('The same request')).length >= 3) break

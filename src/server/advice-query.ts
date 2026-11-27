@@ -23,6 +23,7 @@ const NETWORK_MODE = guide('network-mode', 'Network Mode')
 const INFINITE = guide('infinite-queries', 'Infinite Queries')
 const SUSPENSE = guide('suspense', 'Suspense')
 const DEPENDENT = guide('dependent-queries', 'Dependent Queries')
+const CANCELLATION = guide('query-cancellation', 'Query Cancellation')
 const STABLE_CLIENT: Reference = {
   label: 'TanStack Query ESLint rule: stable-query-client',
   at: 'https://tanstack.com/query/latest/docs/eslint/stable-query-client',
@@ -331,6 +332,41 @@ export const QUERY_RULES: Array<Rule> = [
           title: 'The app created a new QueryClient during one page load',
           entries: numbers(unexplained),
           evidence: ['No hot update or reload came before it.'],
+        },
+      ]
+    },
+  },
+  {
+    id: 'query/restarted-on-mount',
+    fix: "Nothing to fix if this is development only. A query function that passes `signal` on is cancelled when the query loses its last observer, and React's StrictMode mounts every component twice in development, so a request in flight is aborted and sent again. Production mounts once. If it also happens in a production build, something really is unmounting and remounting the component that reads the query.",
+    docs: CANCELLATION,
+    check: (context) => {
+      const fetches = context.by('query', 'fetch')
+      const ends = context.by('query', 'success', 'error')
+      const aborted = context.by('network', 'aborted')
+      const restarts: Array<{ first: LogEntry; second: LogEntry; request: LogEntry }> = []
+      for (const second of fetches) {
+        const first = fetches.findLast((entry) => entry.key === second.key && entry.n < second.n)
+        if (!first || second.t - first.t > 5000) continue
+        // The first fetch never finished: it was replaced, not followed.
+        if (ends.some((end) => end.key === second.key && end.n > first.n && end.n < second.n)) continue
+        const request = aborted.find((entry) => entry.t >= second.t - 20 && entry.t - second.t <= 100)
+        if (request) restarts.push({ first, second, request })
+      }
+      if (restarts.length === 0) return []
+      const wasted = restarts.reduce((sum, restart) => sum + (restart.request.dur ?? 0), 0)
+      return [
+        {
+          severity: 'info',
+          title: `${restarts.length} ${restarts.length === 1 ? 'query had its request' : 'queries had their requests'} cancelled and sent again as the component mounted`,
+          entries: numbers(restarts.map((restart) => restart.second)),
+          evidence: [
+            ...restarts
+              .slice(-4)
+              .map((restart) => `${clip(restart.second.key ?? '', 110)}: cancelled after ${restart.request.dur ?? '?'} ms${where(restart.first)}`),
+            `${wasted} ms of requests thrown away in total`,
+          ],
+          hint: 'Timings measured in development include this. Do not read them as production numbers.',
         },
       ]
     },
