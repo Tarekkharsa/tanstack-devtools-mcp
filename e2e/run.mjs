@@ -330,4 +330,119 @@ try {
   await vite.close()
 }
 
+// Second run: Vite DevTools on, this package's own endpoint off. The tools
+// are served from Vite DevTools' MCP route only, and the page connects
+// through the dev server itself.
+console.log('\nthrough Vite DevTools')
+process.env.VITE_DEVTOOLS = '1'
+process.env.MCP_STANDALONE = '0'
+const hosted = await createServer({ root, server: { port: 5192, strictPort: true } })
+await hosted.listen()
+const hostedUrl = hosted.resolvedUrls.local[0]
+const hostedOrigin = new URL(hostedUrl).origin
+const route = new URL('__devtools/__mcp', hostedUrl)
+const hostedBrowser = await chromium.launch({ channel: 'chrome', headless: true })
+const viaDevtools = new Client({ name: 'e2e-devtools', version: '0.0.0' })
+
+async function callHosted(name, args = {}) {
+  const result = await viaDevtools.callTool({ name, arguments: args })
+  const text = result.content[0].text
+  if (result.isError) throw new Error(`${name}: ${text}`)
+  return JSON.parse(text)
+}
+
+try {
+  const page = await hostedBrowser.newPage()
+  const pageErrors = []
+  page.on('pageerror', (error) => pageErrors.push(error.message))
+  await page.goto(hostedUrl)
+  await page.getByRole('link', { name: 'Posts' }).click()
+  await page.getByRole('link', { name: 'Routes are state' }).waitFor()
+
+  // The route wants a loopback Origin, as an MCP client is configured to send.
+  await viaDevtools.connect(
+    new StreamableHTTPClientTransport(route, {
+      requestInit: { headers: { Origin: hostedOrigin } },
+    }),
+  )
+
+  await step("the tools are on Vite DevTools' route, next to its own", async () => {
+    const { tools } = await viaDevtools.listTools()
+    const ours = tools.filter((tool) => tool.name.startsWith('tanstack_'))
+    assert.equal(ours.length, 20, ours.map((tool) => tool.name).join(' '))
+    assert.ok(tools.length > ours.length, 'Vite DevTools serves tools of its own')
+    const navigate = ours.find((tool) => tool.name === 'tanstack_navigate')
+    assert.deepEqual(navigate.inputSchema.required, ['to'])
+    assert.equal(navigate.annotations.readOnlyHint, false)
+    assert.equal(ours.find((tool) => tool.name === 'tanstack_overview').annotations.readOnlyHint, true)
+  })
+
+  await step('no second port is open', async () => {
+    await assert.rejects(fetch(`http://127.0.0.1:${MCP_PORT}/`), /fetch failed/)
+  })
+
+  await step('the page connected through the dev server, with nothing in the app', async () => {
+    const overview = await callHosted('tanstack_overview')
+    assert.equal(overview.connected, true)
+    assert.match(overview.url, /\/posts$/)
+    assert.deepEqual(overview.router.matches, ['__root__', '/posts'])
+    assert.deepEqual(overview.query.byStatus, { success: 1 })
+  })
+
+  await step('reads, an action and the timeline work through the route', async () => {
+    const { lastEntry } = await callHosted('tanstack_count_events')
+    const moved = await callHosted('tanstack_navigate', { to: '/posts/$postId', params: { postId: '2' } })
+    assert.equal(moved.location.pathname, '/posts/2')
+    await page.getByRole('heading', { name: 'Routes are state' }).waitFor()
+    const waited = await callHosted('tanstack_wait_for_idle', { after: lastEntry })
+    assert.equal(waited.idle, true)
+    const seen = kinds(waited.entries)
+    for (const kind of ['router/onBeforeNavigate', 'query/fetch', 'network/ok', 'query/success', 'router/onResolved']) {
+      assert.ok(seen.includes(kind), `${kind} missing from ${seen.join(' ')}`)
+    }
+    const request = waited.entries.find((e) => e.source === 'network')
+    assert.match(request.from, /^request src\/main\.tsx:\d+:\d+$/)
+    const query = await callHosted('tanstack_get_query', { queryHash: '["post",2]' })
+    assert.equal(query.data.title, 'Routes are state')
+    assert.ok(query.usedAt.length > 0)
+  })
+
+  await step('after an edit, wait_for_update reports the hot update through the route', async () => {
+    await page.getByRole('link', { name: 'Home' }).click()
+    await page.getByText('Open Posts, then ask your agent').waitFor()
+    await callHosted('tanstack_wait_for_idle')
+    const { lastEntry } = await callHosted('tanstack_count_events')
+    writeFileSync(homeFile, homeSource.replace('Open Posts, then ask', 'Edited through DevTools, then ask'))
+    const result = await callHosted('tanstack_wait_for_update', { after: lastEntry })
+    assert.equal(result.update, 'hmr-update', JSON.stringify(result).slice(0, 400))
+    assert.deepEqual(result.files, ['src/Home.tsx'])
+    await page.getByText('Edited through DevTools, then ask').waitFor()
+  })
+
+  await step('a tool failure reaches the agent as an error', async () => {
+    const result = await viaDevtools.callTool({ name: 'tanstack_get_query', arguments: { queryHash: 'nope' } })
+    assert.equal(result.isError, true)
+    assert.match(result.content[0].text, /No query with hash nope/)
+  })
+
+  await step('the route refuses a request with no Origin, unlike the standalone endpoint', async () => {
+    const response = await fetch(route, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+    })
+    assert.equal(response.status, 403)
+  })
+
+  assert.deepEqual(pageErrors, [], 'the page threw')
+} catch (error) {
+  failed = true
+  console.error(error)
+} finally {
+  writeFileSync(homeFile, homeSource)
+  await viaDevtools.close().catch(() => {})
+  await hostedBrowser.close()
+  await hosted.close()
+}
+
 process.exit(failed ? 1 : 0)

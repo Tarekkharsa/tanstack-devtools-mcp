@@ -3,7 +3,7 @@ import { dirname, join, posix, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { TraceMap, originalPositionFor } from '@jridgewell/trace-mapping'
 import { registerOnAgentHost } from './server/devframe.js'
-import { startServer } from './server/http.js'
+import { createBridge, isLoopbackName, startServer } from './server/http.js'
 import { Hub } from './server/hub.js'
 import type { Plugin, ViteDevServer } from 'vite'
 import type { Frame } from './protocol.js'
@@ -16,7 +16,18 @@ export interface TanStackDevtoolsMcpOptions
    * Turn it off to call `connect` yourself. Default true.
    */
   inject?: boolean
+  /**
+   * Run this package's own MCP endpoint on its own port. Default true.
+   *
+   * Set it to false when Vite DevTools is enabled and you want one endpoint
+   * only: the tools are then served from Vite DevTools' MCP route alone, and
+   * the page connects through the dev server itself, so no second port opens.
+   */
+  standalone?: boolean
 }
+
+/** Where the page connects when the bridge lives on the dev server itself. */
+const SAME_SERVER_BRIDGE = '__tanstack-devtools-mcp/bridge'
 
 /** The page-side code is served from virtual modules under this prefix. */
 const PREFIX = '\0tanstack-devtools-mcp:'
@@ -214,6 +225,29 @@ function recordVite(server: ViteDevServer, hub: Hub): void {
 }
 
 /**
+ * Whether a `Host` header names this dev server: a loopback name, or a host
+ * the Vite config allows. Vite applies the same rule to its own requests; it
+ * is what stops another site, rebound to this machine, from posing as a page.
+ */
+function servedHost(server: ViteDevServer, host: string | undefined): boolean {
+  if (host === undefined) return false
+  let hostname: string
+  try {
+    hostname = new URL(`http://${host}`).hostname
+  } catch {
+    return false
+  }
+  if (isLoopbackName(hostname)) return true
+  const allowed = server.config.server.allowedHosts
+  if (allowed === true) return true
+  return (allowed ?? []).some((entry) =>
+    entry.startsWith('.')
+      ? hostname === entry.slice(1) || hostname.endsWith(entry)
+      : hostname === entry,
+  )
+}
+
+/**
  * Runs the MCP server with `vite dev` and connects the page to it.
  *
  * ```ts
@@ -232,9 +266,12 @@ function recordVite(server: ViteDevServer, hub: Hub): void {
 export function tanstackDevtoolsMcp(
   options: TanStackDevtoolsMcpOptions = {},
 ): Plugin {
-  const { inject = true, ...serverOptions } = options
+  const { inject = true, standalone = true, ...serverOptions } = options
   let running: RunningServer | undefined
   let base = '/'
+  /** A JavaScript expression for the bridge URL, once there is a bridge. */
+  let bridgeUrl: string | undefined
+  let onDevtools = false
   // Made here, before any server exists, so the standalone endpoint and the
   // Vite DevTools route below serve the same sessions and the same log.
   let resolveFrame: ((frame: Frame) => Promise<string | undefined>) | undefined
@@ -249,28 +286,62 @@ export function tanstackDevtoolsMcp(
     },
 
     async configureServer(server) {
-      try {
-        resolveFrame = sourceResolver(server)
-        running = await startServer({ ...serverOptions, hub })
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error)
-        server.config.logger.warn(
-          `[tanstack-devtools-mcp] not started: ${reason}. Set \`port\` to use another one.`,
-        )
-        return
+      const logger = server.config.logger
+      resolveFrame = sourceResolver(server)
+
+      if (standalone) {
+        try {
+          running = await startServer({ ...serverOptions, hub })
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error)
+          logger.warn(
+            `[tanstack-devtools-mcp] not started: ${reason}. Set \`port\` to use another one.`,
+          )
+          return
+        }
+        const stop = () => {
+          void running?.close()
+          running = undefined
+        }
+        server.httpServer?.once('close', stop)
+        bridgeUrl = JSON.stringify(running.bridgeUrl)
+        const print = server.printUrls.bind(server)
+        const mcpUrl = running.mcpUrl
+        server.printUrls = () => {
+          print()
+          logger.info(`  ➜  TanStack MCP: ${mcpUrl}`)
+        }
+      } else {
+        // No port of our own: the page reaches the hub through the dev
+        // server it was served from, and agents through Vite DevTools.
+        const http = server.httpServer
+        if (!http) {
+          logger.warn(
+            '[tanstack-devtools-mcp] `standalone: false` needs the dev server to own an HTTP server. Nothing is connected.',
+          )
+          return
+        }
+        const path = base + SAME_SERVER_BRIDGE
+        const bridge = createBridge(hub, {
+          path,
+          sameOrigin: true,
+          hostAllowed: (host) => servedHost(server, host),
+          ...(serverOptions.origins ? { origins: serverOptions.origins } : {}),
+        })
+        http.on('upgrade', bridge.handle)
+        http.once('close', () => bridge.close())
+        bridgeUrl = `(location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + ${JSON.stringify(path)}`
+        http.once('listening', () => {
+          // The DevTools hook has run by now if it was going to.
+          setTimeout(() => {
+            if (onDevtools) return
+            logger.warn(
+              '[tanstack-devtools-mcp] `standalone: false`, but Vite DevTools did not ask for the tools, so no agent can reach them. Enable `devtools` in the Vite config and install @vitejs/devtools and @devframes/agentic, or remove `standalone: false`.',
+            )
+          }, 3000).unref()
+        })
       }
-      const stop = () => {
-        void running?.close()
-        running = undefined
-      }
-      server.httpServer?.once('close', stop)
-      recordVite(server, running.hub)
-      const print = server.printUrls.bind(server)
-      const mcpUrl = running.mcpUrl
-      server.printUrls = () => {
-        print()
-        server.config.logger.info(`  ➜  TanStack MCP: ${mcpUrl}`)
-      }
+      recordVite(server, hub)
     },
 
     // The page-side modules are served from memory, read from this package's
@@ -288,8 +359,8 @@ export function tanstackDevtoolsMcp(
     load(id) {
       if (!id.startsWith(PREFIX)) return undefined
       if (id === ENTRY) {
-        if (!running) return ''
-        return `import { connect } from './client/index.js'\nconnect({ url: ${JSON.stringify(running.bridgeUrl)} })\n`
+        if (bridgeUrl === undefined) return ''
+        return `import { connect } from './client/index.js'\nconnect({ url: ${bridgeUrl} })\n`
       }
       const file = join(dist, id.slice(PREFIX.length))
       if (!file.startsWith(dist + sep) || !file.endsWith('.js')) return undefined
@@ -297,7 +368,7 @@ export function tanstackDevtoolsMcp(
     },
 
     transform(code, id) {
-      if (!inject || !running) return undefined
+      if (!inject || bridgeUrl === undefined) return undefined
       if (!VITE_CLIENT.test(id.split('?')[0]!)) return undefined
       if (!code.includes('createHotContext')) return undefined
       // Not awaited and not a static import: if this fails, the app and its
@@ -313,7 +384,7 @@ export function tanstackDevtoolsMcp(
     transformIndexHtml: {
       order: 'pre',
       handler() {
-        if (!inject || !running) return undefined
+        if (!inject || bridgeUrl === undefined) return undefined
         // Earlier than the import above: it runs before the app's modules, so
         // tools a library registers while loading are collected too.
         return [
@@ -334,6 +405,7 @@ export function tanstackDevtoolsMcp(
       async setup(context: { agent?: Parameters<typeof registerOnAgentHost>[0] }) {
         if (!context.agent) return
         await registerOnAgentHost(context.agent, hub, serverOptions)
+        onDevtools = true
       },
     },
   })

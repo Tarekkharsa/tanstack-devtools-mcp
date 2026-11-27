@@ -225,6 +225,55 @@ call_page_tool { "name": "cart.getCart" }
 
 In a browser without WebMCP, the page-side code defines a minimal `document.modelContext` so the registration has somewhere to go. In a browser with it, `registerTool` is wrapped and the browser still gets every tool.
 
+## With Vite DevTools
+
+If the app runs [Vite DevTools](https://github.com/vitejs/devtools), the same tools are also served from its MCP route, next to its own and other plugins'. Nothing to configure in this plugin: Vite DevTools calls it when enabled.
+
+```ts
+// vite.config.ts
+export default defineConfig({
+  devtools: true,
+  plugins: [tanstackDevtoolsMcp()],
+})
+```
+
+```sh
+pnpm add -D @vitejs/devtools @devframes/agentic
+```
+
+Vite DevTools mounts its MCP route only when `@devframes/agentic` is installed. The tools appear there as `tanstack_overview`, `tanstack_diagnose` and so on, at `/__devtools/__mcp` on the dev server's own port.
+
+That route is stricter than this package's endpoint in one way that matters when connecting: it refuses any request without a loopback `Origin` header. Claude Code does not send one by itself, and reports the refusal as "needs authentication", so set it:
+
+```json
+{
+  "mcpServers": {
+    "vite": {
+      "type": "http",
+      "url": "http://localhost:5173/__devtools/__mcp",
+      "headers": { "Origin": "http://localhost:5173" }
+    }
+  }
+}
+```
+
+A client that cannot set headers can go through `npx devframe connect` instead, a stdio server that finds running dev servers by itself. It exposes two tools, one to list the instances and their tools and one to call a tool by name, so the tools are one step removed and the listing is large.
+
+To have that route as the only endpoint, turn this package's own off:
+
+```ts
+tanstackDevtoolsMcp({ standalone: false })
+```
+
+The page then connects through the dev server it was served from, and no second port opens. It needs the dev server to own its HTTP server, so not Vite's middleware mode.
+
+| | This package's endpoint | Vite DevTools' route |
+| --- | --- | --- |
+| Address | `http://127.0.0.1:4777/mcp`, fixed | `/__devtools/__mcp` on the dev server's port |
+| `Origin` header | must be absent | must be a loopback origin |
+| Tool names | `overview` | `tanstack_overview` |
+| Needs | nothing else | Vite DevTools enabled, `@devframes/agentic` installed |
+
 ## Without Vite
 
 Run the server on its own and connect the page yourself:
@@ -247,11 +296,13 @@ The server listens on `127.0.0.1` only and has no option to listen elsewhere.
 - Both routes refuse a `Host` header that is not a loopback name, which stops DNS rebinding.
 - `/bridge` accepts WebSocket connections from loopback origins and the ones you list in `origins`.
 
+With `standalone: false` there is no server of this package's own. The page's WebSocket goes to the dev server, which accepts it from loopback origins, from the page's own origin when the `Host` is one the Vite config allows (`server.allowedHosts`), and from the origins you list. Who may call the tools is then decided by Vite DevTools' route.
+
 There is no token. Any process on your machine can connect, as it can to the Vite dev server. Query data, loader data and request URLs are sent to whoever connects, so do not run it against data you would not show a local process.
 
 ## Status and limits
 
-Verified: React 19, TanStack Query 5, TanStack Router 1.170, Vite 8 and Chrome, on a single-page app and on a production-sized TanStack Start app under Vite+. `pnpm test` runs the unit and HTTP tests and `pnpm e2e` drives the example in headless Chrome through the MCP endpoint, including a hot update, a build error and its fix.
+Verified: React 19, TanStack Query 5, TanStack Router 1.170, Vite 8 and Chrome, on a single-page app and on a production-sized TanStack Start app under Vite+. `pnpm test` runs the unit and HTTP tests and `pnpm e2e` drives the example in headless Chrome through the MCP endpoint, including a hot update, a build error and its fix. The Vite DevTools route is driven the same way with `@vitejs/devtools` 0.8.3, and a Claude Code run was connected to it by hand; on Vite+ with 0.8.0 the tools were only checked to be listed.
 
 Not verified: the Vue, Solid, Svelte and Angular adapters, and Vite below 8. The page-side code reads Query and Router by shape, not by import, so they may work.
 

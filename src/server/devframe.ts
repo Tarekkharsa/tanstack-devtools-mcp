@@ -1,6 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
-import { createMcpServer } from './mcp.js'
+import { createMcpServer, instructions } from './mcp.js'
 import type { Hub } from './hub.js'
 import type { McpOptions } from './mcp.js'
 
@@ -41,7 +41,12 @@ export async function registerOnAgentHost(
     agent.registerTool({
       id: `tanstack:${tool.name}`,
       ...(tool.title ? { title: tool.title } : {}),
-      description: tool.description ?? tool.name,
+      // A shared route has no place for this server's own instructions, so
+      // the tool an agent is told to start with carries them.
+      description:
+        tool.name === 'overview'
+          ? `${tool.description ?? ''} How to use the tanstack tools: ${instructions}`
+          : (tool.description ?? tool.name),
       safety: tool.annotations?.readOnlyHint === true ? 'read' : 'action',
       inputSchema: tool.inputSchema,
       handler: async (args) => {

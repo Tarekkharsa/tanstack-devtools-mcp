@@ -28,6 +28,12 @@ describe('the Vite DevTools adapter', () => {
       required: ['queryHash'],
       properties: { queryHash: { type: 'string' }, depth: { type: 'integer' } },
     })
+    // The shared route cannot deliver this server's instructions, so the
+    // tool an agent starts with carries them. No other tool repeats them.
+    expect(tools.get('tanstack:overview')!.description).toMatch(
+      /Start here\. How to use the tanstack tools: .*call wait_for_update/,
+    )
+    expect(getQuery.description).not.toMatch(/How to use the tanstack tools/)
     // Not marked read-only: it can run a tool the page registered.
     expect(tools.get('tanstack:call_page_tool')!.safety).toBe('action')
   })

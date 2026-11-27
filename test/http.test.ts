@@ -1,9 +1,10 @@
-import { request } from 'node:http'
+import { createServer, request } from 'node:http'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { afterEach, describe, expect, it } from 'vitest'
 import { WebSocket } from 'ws'
-import { startServer } from '../src/server/http.js'
+import { createBridge, startServer } from '../src/server/http.js'
+import { Hub } from '../src/server/hub.js'
 import type { RunningServer, ServerOptions } from '../src/server/http.js'
 import type { SessionInfo } from '../src/protocol.js'
 
@@ -211,5 +212,86 @@ describe('/bridge', () => {
       'The page did not answer query.list in 40 ms.',
     )
     page.close()
+  })
+})
+
+describe('the bridge on a server that is not ours', () => {
+  // As it runs with `standalone: false`: one upgrade handler among others on
+  // the dev server the page came from.
+  async function host(options: { allowHost?: (host: string | undefined) => boolean } = {}) {
+    const hub = new Hub()
+    const bridge = createBridge(hub, {
+      path: '/__tanstack-devtools-mcp/bridge',
+      sameOrigin: true,
+      ...(options.allowHost ? { hostAllowed: options.allowHost } : {}),
+    })
+    const others: Array<string> = []
+    const http = createServer()
+    http.on('upgrade', (request, socket, head) => {
+      if (bridge.handle(request, socket, head)) return
+      // What another listener, such as Vite's own, would get.
+      others.push(request.url ?? '')
+      socket.end('HTTP/1.1 404 Not Found\r\n\r\n')
+    })
+    await new Promise<void>((resolve) => http.listen(0, '127.0.0.1', resolve))
+    const port = (http.address() as { port: number }).port
+    closers.push(
+      () =>
+        new Promise<void>((resolve) => {
+          bridge.close()
+          http.closeAllConnections()
+          http.close(() => resolve())
+        }),
+    )
+    return { hub, port, others, url: `ws://127.0.0.1:${port}/__tanstack-devtools-mcp/bridge` }
+  }
+  const closers: Array<() => Promise<void>> = []
+  afterEach(async () => {
+    for (const close of closers.splice(0)) await close()
+  })
+
+  it('accepts the page it serves and leaves every other path alone', async () => {
+    const { hub, port, others, url } = await host()
+    const page = await open(url, `http://127.0.0.1:${port}`)
+    page.send(JSON.stringify({ kind: 'hello', session }))
+    await expect.poll(() => hub.sessions.get('page-1')?.connected).toBe(true)
+    page.close()
+
+    await expect(open(`ws://127.0.0.1:${port}/@vite/hmr`, `http://127.0.0.1:${port}`)).rejects.toThrow(/404/)
+    expect(others).toEqual(['/@vite/hmr'])
+  })
+
+  it('refuses another site, and a site rebound to this machine under its own name', async () => {
+    const { url } = await host()
+    await expect(open(url, 'https://evil.example')).rejects.toThrow(/403/)
+    // DNS rebinding: Host and Origin agree with each other, but name a host
+    // this server was never served under.
+    await expect(
+      new Promise((resolve, reject) => {
+        const socket = new WebSocket(url, { origin: 'http://evil.example:5173', headers: { host: 'evil.example:5173' } })
+        socket.once('open', resolve)
+        socket.once('error', reject)
+      }),
+    ).rejects.toThrow(/403/)
+  })
+
+  it('accepts a page under a host name the dev server allows', async () => {
+    const { url, hub } = await host({ allowHost: (name) => name === 'app.test:5173' })
+    const page = await new Promise<WebSocket>((resolve, reject) => {
+      const socket = new WebSocket(url, { origin: 'http://app.test:5173', headers: { host: 'app.test:5173' } })
+      socket.once('open', () => resolve(socket))
+      socket.once('error', reject)
+    })
+    page.send(JSON.stringify({ kind: 'hello', session }))
+    await expect.poll(() => hub.sessions.size).toBe(1)
+    page.close()
+    // Allowed host, but a page from somewhere else.
+    await expect(
+      new Promise((resolve, reject) => {
+        const socket = new WebSocket(url, { origin: 'https://evil.example', headers: { host: 'app.test:5173' } })
+        socket.once('open', resolve)
+        socket.once('error', reject)
+      }),
+    ).rejects.toThrow(/403/)
   })
 })

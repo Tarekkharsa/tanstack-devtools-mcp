@@ -47,6 +47,8 @@ export default defineConfig({
     tanstackDevtoolsMcp({
       actions: true,
       ...(process.env.MCP_PORT ? { port: Number(process.env.MCP_PORT) } : {}),
+      // With Vite DevTools on, MCP_STANDALONE=0 leaves its route as the only endpoint.
+      standalone: process.env.MCP_STANDALONE !== '0',
     }),
   ],
 })

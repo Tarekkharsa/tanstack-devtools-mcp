@@ -13,7 +13,7 @@ export interface McpOptions {
   actions?: boolean
 }
 
-const instructions = [
+export const instructions = [
   'Inspects a TanStack app running in a browser tab during development: the Query cache, the Router, network calls, console errors and what Vite did with each edit, on one numbered timeline.',
   'Start with overview. After you edit a file, call wait_for_update: it tells you whether the edit compiled and applied, and what the page did next.',
   'After you change the app with a tool, call wait_for_idle with the last entry number you saw.',

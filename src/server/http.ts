@@ -5,6 +5,7 @@ import { BRIDGE_PATH, DEFAULT_PORT, MCP_PATH } from '../protocol.js'
 import { Hub } from './hub.js'
 import { createMcpServer } from './mcp.js'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { Duplex } from 'node:stream'
 import type { HubOptions } from './hub.js'
 import type { McpOptions } from './mcp.js'
 
@@ -34,7 +35,7 @@ const HOST = '127.0.0.1'
 const MAX_BODY = 4 * 1024 * 1024
 const loopback = new Set(['localhost', '127.0.0.1', '[::1]', '::1'])
 
-function isLoopbackName(hostname: string): boolean {
+export function isLoopbackName(hostname: string): boolean {
   return loopback.has(hostname) || hostname.endsWith('.localhost')
 }
 
@@ -85,6 +86,75 @@ function readBody(request: IncomingMessage): Promise<unknown> {
   })
 }
 
+export interface BridgeOptions {
+  /** The path pages connect to. */
+  path: string
+  /** Extra page origins allowed to connect. Loopback origins always are. */
+  origins?: Array<string>
+  /**
+   * Whether a `Host` header names this server. Defaults to loopback names
+   * only. A dev server that is reached under another name passes its own rule.
+   */
+  hostAllowed?: (host: string | undefined) => boolean
+  /**
+   * Also accept a page whose origin is the host it connected to, for a bridge
+   * that lives on the dev server the page itself came from.
+   */
+  sameOrigin?: boolean
+}
+
+export interface Bridge {
+  /**
+   * Handles an HTTP upgrade request. Returns false, having touched nothing,
+   * when the request is for another path, so other listeners can take it.
+   */
+  handle: (request: IncomingMessage, socket: Duplex, head: Buffer) => boolean
+  close: () => void
+}
+
+/** The page side of the hub, as an upgrade handler for any Node HTTP server. */
+export function createBridge(hub: Hub, options: BridgeOptions): Bridge {
+  const extraOrigins = new Set(options.origins ?? [])
+  const isHost = options.hostAllowed ?? hostAllowed
+  const sockets = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 })
+
+  const originAllowed = (origin: string | undefined, host: string | undefined) => {
+    if (origin === undefined) return true
+    if (extraOrigins.has(origin)) return true
+    try {
+      const url = new URL(origin)
+      if (isLoopbackName(url.hostname)) return true
+      return options.sameOrigin === true && host !== undefined && url.host === host
+    } catch {
+      return false
+    }
+  }
+
+  return {
+    handle(request, socket, head) {
+      const path = new URL(request.url ?? '/', 'http://localhost').pathname
+      if (path !== options.path) return false
+      const host = request.headers.host
+      if (!isHost(host) || !originAllowed(request.headers.origin, host)) {
+        socket.end('HTTP/1.1 403 Forbidden\r\n\r\n')
+        return true
+      }
+      sockets.handleUpgrade(request, socket, head, (ws) => {
+        hub.attach({
+          send: (text) => ws.send(text),
+          onMessage: (listener) => ws.on('message', (data) => listener(String(data))),
+          onClose: (listener) => ws.on('close', listener),
+        })
+      })
+      return true
+    },
+    close() {
+      for (const client of sockets.clients) client.terminate()
+      sockets.close()
+    },
+  }
+}
+
 /**
  * Starts the server on loopback: `/mcp` for agents (MCP over Streamable HTTP)
  * and `/bridge` for pages (WebSocket).
@@ -97,17 +167,10 @@ function readBody(request: IncomingMessage): Promise<unknown> {
  */
 export function startServer(options: ServerOptions = {}): Promise<RunningServer> {
   const hub = options.hub ?? new Hub(options)
-  const extraOrigins = new Set(options.origins ?? [])
-
-  const originAllowed = (origin: string | undefined) => {
-    if (origin === undefined) return true
-    if (extraOrigins.has(origin)) return true
-    try {
-      return isLoopbackName(new URL(origin).hostname)
-    } catch {
-      return false
-    }
-  }
+  const bridge = createBridge(hub, {
+    path: BRIDGE_PATH,
+    ...(options.origins ? { origins: options.origins } : {}),
+  })
 
   const handleMcp = async (request: IncomingMessage, response: ServerResponse) => {
     if (request.headers.origin !== undefined) {
@@ -164,27 +227,9 @@ export function startServer(options: ServerOptions = {}): Promise<RunningServer>
     json(response, 404, { error: 'Not found' })
   })
 
-  const sockets = new WebSocketServer({
-    noServer: true,
-    maxPayload: 16 * 1024 * 1024,
-  })
   server.on('upgrade', (request, socket, head) => {
-    const path = new URL(request.url ?? '/', 'http://localhost').pathname
-    if (
-      path !== BRIDGE_PATH ||
-      !hostAllowed(request.headers.host) ||
-      !originAllowed(request.headers.origin)
-    ) {
-      socket.end('HTTP/1.1 403 Forbidden\r\n\r\n')
-      return
-    }
-    sockets.handleUpgrade(request, socket, head, (ws) => {
-      hub.attach({
-        send: (text) => ws.send(text),
-        onMessage: (listener) => ws.on('message', (data) => listener(String(data))),
-        onClose: (listener) => ws.on('close', listener),
-      })
-    })
+    // Nothing else lives on this server, so any other path is refused.
+    if (!bridge.handle(request, socket, head)) socket.end('HTTP/1.1 403 Forbidden\r\n\r\n')
   })
 
   return new Promise((resolve, reject) => {
@@ -200,8 +245,7 @@ export function startServer(options: ServerOptions = {}): Promise<RunningServer>
         hub,
         close: () =>
           new Promise((done) => {
-            for (const client of sockets.clients) client.terminate()
-            sockets.close()
+            bridge.close()
             server.closeAllConnections()
             server.close(() => done())
           }),
