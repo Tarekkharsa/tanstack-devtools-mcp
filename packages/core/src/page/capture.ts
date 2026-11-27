@@ -1,3 +1,4 @@
+import { noteFailedImage } from './document.js'
 import { brief } from './serialize.js'
 import { appFrames, here } from './stack.js'
 import type { Frame } from '../protocol.js'
@@ -221,6 +222,8 @@ const PENDING_WINDOW_MS = 10_000
 export interface NetworkRecorder {
   /** Requests started in the last ten seconds that have not finished. */
   pending: () => number
+  /** Requests still in flight, oldest first, and how long each has been. */
+  waiting: () => Array<{ request: string; forMs: number }>
   /** Adds a function that renames requests it understands. */
   annotate: (annotator: RequestAnnotator) => () => void
   stop: () => void
@@ -243,9 +246,11 @@ export function recordNetwork(
   options: NetworkOptions = {},
 ): NetworkRecorder {
   if (typeof window === 'undefined') {
-    return { pending: () => 0, annotate: () => () => {}, stop: () => {} }
+    return { pending: () => 0, waiting: () => [], annotate: () => () => {}, stop: () => {} }
   }
   const open = new Map<number, number>()
+  /** What each open request is, for saying what the page still waits on. */
+  const labels = new Map<number, string>()
   const ignored = (options.ignore ?? []).map((source) => new RegExp(source))
   const annotators = new Set<RequestAnnotator>()
   let nextId = 1
@@ -272,9 +277,10 @@ export function recordNetwork(
     }
   }
 
-  const begin = () => {
+  const begin = (label: string) => {
     const id = nextId++
     open.set(id, performance.now())
+    labels.set(id, label)
     return id
   }
   const finish = (
@@ -287,6 +293,7 @@ export function recordNetwork(
   ) => {
     const started = open.get(id)
     open.delete(id)
+    labels.delete(id)
     const dur = started === undefined ? undefined : Math.round(performance.now() - started)
     const failed = 'failure' in outcome
     const status = failed ? 0 : outcome.status
@@ -316,7 +323,7 @@ export function recordNetwork(
           init?.method ?? (typeof input === 'object' && 'method' in input ? input.method : 'GET')
         ).toUpperCase()
         const frames = here()
-        const id = begin()
+        const id = begin(`${method} ${target.shown}`)
         promise.then(
           (response) => finish(id, 'fetch', method, target, { status: response.status }, frames),
           (error) =>
@@ -352,7 +359,7 @@ export function recordNetwork(
         const target = info ? describe(info.url) : undefined
         if (info && target) {
           const frames = here()
-          const id = begin()
+          const id = begin(`${info.method} ${target.shown}`)
           this.addEventListener(
             'loadend',
             () =>
@@ -374,6 +381,41 @@ export function recordNetwork(
     }
   }
 
+  // A script or stylesheet the browser could not load never passes through
+  // `fetch`. Its `error` event does not bubble, so it is caught on the way
+  // down. A failed image is only remembered, for the page's own account of
+  // itself: an app can have many, and they are not requests the code made.
+  const onResourceError = (event: Event) => {
+    try {
+      const element = event.target
+      if (!(element instanceof Element)) return
+      if (element instanceof HTMLImageElement) {
+        noteFailedImage(element)
+        return
+      }
+      const raw =
+        element instanceof HTMLScriptElement
+          ? element.src
+          : element instanceof HTMLLinkElement && /stylesheet|modulepreload/i.test(element.rel)
+            ? element.href
+            : ''
+      if (!raw) return
+      const target = describe(raw)
+      if (!target) return
+      record({
+        source: 'network',
+        type: 'failed',
+        problem: true,
+        key: target.key,
+        summary: `GET ${target.shown} → the ${element instanceof HTMLScriptElement ? 'script' : 'stylesheet'} did not load`,
+        detail: { kind: 'resource', id: `GET ${target.id}` },
+      })
+    } catch {
+      // As above.
+    }
+  }
+  window.addEventListener('error', onResourceError, true)
+
   return {
     pending: () => {
       const cutoff = performance.now() - PENDING_WINDOW_MS
@@ -381,11 +423,22 @@ export function recordNetwork(
       for (const started of open.values()) if (started >= cutoff) count += 1
       return count
     },
+    waiting: () => {
+      const now = performance.now()
+      return [...open.entries()]
+        .map(([id, started]) => ({
+          request: (labels.get(id) ?? '').slice(0, 200),
+          forMs: Math.round(now - started),
+        }))
+        .sort((a, b) => b.forMs - a.forMs)
+        .slice(0, 10)
+    },
     annotate: (annotator) => {
       annotators.add(annotator)
       return () => annotators.delete(annotator)
     },
     stop: () => {
+      window.removeEventListener('error', onResourceError, true)
       if (window.fetch === patchedFetch) window.fetch = originalFetch
       if (xhr && originalOpen && originalSend) {
         xhr.open = originalOpen

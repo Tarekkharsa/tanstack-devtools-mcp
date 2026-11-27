@@ -291,6 +291,13 @@ From the skills shipped in the TanStack Start packages, the `@vitejs/plugin-reac
 - a component file that reloads the whole page on every edit
 - requests rejected with 431
 
+From the page itself, with no library involved:
+
+- a page the server answered with an error status, even though something rendered
+- images that did not load
+- links and controls with no accessible name, which is often content that failed to render
+- a request that has been in flight for over ten seconds
+
 It also recognises 25 warnings and errors that TanStack Query, Router, Start and Vite print themselves, such as "Query data cannot be undefined" or "Mocked import used in dev client", and pairs each with its documented fix.
 
 Findings of severity `info` are judgment calls: a waterfall can be a real dependency, a late query can be data the page does not need at first. Their hint says when to ignore them. What can only be seen in source code is left to the linters: `@tanstack/eslint-plugin-query`, `@tanstack/eslint-plugin-router` and `eslint-plugin-react-refresh`.

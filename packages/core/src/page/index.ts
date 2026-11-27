@@ -1,5 +1,6 @@
 import { BRIDGE_PATH, DEFAULT_PORT, GLOBAL_KEY, PROTOCOL } from '../protocol.js'
 import { captureTools, recordConsole, recordNetwork } from './capture.js'
+import { documentFacts } from './document.js'
 import { bounded, brief } from './serialize.js'
 import { ignoreFrames } from './stack.js'
 import type {
@@ -19,6 +20,8 @@ import type { Handlers, Recorder } from './types.js'
 
 export { ago, bounded, brief, diff, drill } from './serialize.js'
 export { appFrames, here, parseStack } from './stack.js'
+export { documentFacts } from './document.js'
+export type { DocumentFacts } from './document.js'
 export type { Bounds, Change } from './serialize.js'
 export type {
   AttachedSource,
@@ -346,6 +349,11 @@ class Bridge {
       idle: this.#idle(),
       ...sources,
       pendingRequests: this.#network?.pending() ?? 0,
+      // Named, so "not idle" can be explained. One open far longer than the
+      // rest is no longer counted as pending, and is usually stuck.
+      ...(this.#network && this.#network.waiting().length > 0
+        ? { waitingOn: this.#network.waiting() }
+        : {}),
       tools: this.tools.size,
     }
   }
@@ -356,6 +364,9 @@ class Bridge {
     for (const slot of this.#slots.values()) {
       if (slot.attached?.facts) facts[slot.source.key] = slot.attached.facts()
     }
+    // The document's own state, under a key no source may take.
+    const page = documentFacts()
+    if (page) facts.document = page
     return { ...this.#overview(), facts, connectedAfterLoad: this.#lateBy }
   }
 

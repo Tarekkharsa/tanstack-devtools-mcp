@@ -170,7 +170,81 @@ export const CORE_RULES: ReadonlyArray<Rule> = [
       return findings
     },
   },
+  {
+    // The page answers these about itself when asked, so they describe it as
+    // it is now and say nothing once it has closed.
+    id: 'core/document-status',
+    check: ({ facts }) => {
+      const status = facts<DocumentState>('document')?.status
+      if (status === undefined || status < 400) return []
+      return [
+        {
+          severity: 'warning',
+          title: `The server answered this page with ${status}`,
+          evidence: ['What is on screen is the page the app shows for that answer.'],
+          hint: 'A page that renders can still be a not-found or error page. Check the address and the route that matched.',
+        },
+      ]
+    },
+  },
+  {
+    id: 'core/stalled-requests',
+    check: ({ overview }) => {
+      const stalled = (overview<Array<{ request: string; forMs: number }>>('waitingOn') ?? []).filter(
+        (item) => item.forMs >= 10_000,
+      )
+      if (stalled.length === 0) return []
+      return [
+        {
+          severity: 'warning',
+          title: `${stalled.length} ${stalled.length === 1 ? 'request has' : 'requests have'} been in flight for over 10 s`,
+          evidence: stalled
+            .slice(0, 5)
+            .map((item) => `${Math.round(item.forMs / 1000)} s and counting: ${clip(item.request, 200)}`),
+          hint: 'The page stops counting these as pending, so it reads as idle while something that depends on them never arrives. Right as it is for a long poll.',
+        },
+      ]
+    },
+  },
+  {
+    id: 'core/broken-images',
+    check: ({ facts }) => {
+      const page = facts<DocumentState>('document')
+      if (!page || !page.brokenImageCount) return []
+      return [
+        {
+          severity: 'warning',
+          title: `${page.brokenImageCount} ${page.brokenImageCount === 1 ? 'image' : 'images'} did not load`,
+          evidence: page.brokenImages.slice(0, 5).map((source) => clip(source, 200)),
+        },
+      ]
+    },
+  },
+  {
+    id: 'core/unnamed-controls',
+    check: ({ facts }) => {
+      const page = facts<DocumentState>('document')
+      if (!page || !page.unnamedCount) return []
+      return [
+        {
+          severity: 'warning',
+          title: `${page.unnamedCount} ${page.unnamedCount === 1 ? 'link or control has' : 'links or controls have'} no accessible name`,
+          evidence: page.unnamed.slice(0, 5).map((html) => clip(html, 260)),
+          hint: 'Each is a tab stop a screen reader cannot describe. Give it visible text, an `aria-label`, or an image with `alt`. An empty link often means its content failed to render.',
+        },
+      ]
+    },
+  },
 ]
+
+/** The page half's `DocumentFacts`, as much of it as the rules read. */
+interface DocumentState {
+  status?: number
+  brokenImages: Array<string>
+  brokenImageCount: number
+  unnamed: Array<string>
+  unnamedCount: number
+}
 
 const CORE_SLOW: ReadonlyArray<SlowKind> = [
   { source: 'network', types: ['ok', 'error'], floorMs: 2000, label: 'request', plural: 'requests' },
