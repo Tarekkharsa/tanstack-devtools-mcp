@@ -44,6 +44,25 @@ export interface HubOptions {
   resolveFrame?: (frame: Frame) => string | undefined | Promise<string | undefined>
 }
 
+/** A request a host tagged: enough to recognise it without the page. */
+export interface RequestTag {
+  method: string
+  /** Path and query, as the dev server received it. */
+  url: string
+  t: number
+}
+
+const TAGS = 2000
+
+/** Thirty-two hex characters: also a valid W3C trace id. */
+function newTag(): string {
+  let out = ''
+  for (let index = 0; index < 4; index++) {
+    out += Math.floor(Math.random() * 0x1_0000_0000).toString(16).padStart(8, '0')
+  }
+  return out
+}
+
 /** How long a server-side entry stays around to greet a page that reloads. */
 const GREETING_MS = 5000
 const RECENT = 50
@@ -68,6 +87,8 @@ export class Hub {
   readonly #resolveFrame: HubOptions['resolveFrame']
   /** The latest server-side entries, whichever sessions were open. */
   readonly recent: Array<Omit<LogEntry, 'n'>> = []
+  /** Requests a host tagged on their way to the app's server, newest last. */
+  readonly tags = new Map<string, RequestTag>()
   #nextCall = 1
 
   constructor(options: HubOptions = {}) {
@@ -172,6 +193,25 @@ export class Hub {
       session.dropped += extra
     }
     return stored
+  }
+
+  /**
+   * Names a request the host is about to pass to the app's server. The host
+   * sends the tag both ways: to the server, and back to the page with the
+   * answer. Pass `id` to keep one the client already sent.
+   */
+  tag(request: Omit<RequestTag, 't'>, id: string = newTag()): string {
+    this.tags.set(id, { ...request, t: Date.now() })
+    if (this.tags.size > TAGS) this.tags.delete(this.tags.keys().next().value!)
+    return id
+  }
+
+  /**
+   * Adds an entry to one session's log from the server side: what a source
+   * learned about that page from somewhere other than the page.
+   */
+  add(session: Session, entry: Omit<LogEntry, 'n'>): LogEntry {
+    return this.#append(session, entry)
   }
 
   /**

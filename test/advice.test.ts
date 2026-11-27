@@ -93,10 +93,16 @@ describe('the catalogue', () => {
       'query/in-error',
       'query/failed-mutations',
       'query/fetch-loop',
+      'server/failed-behind-success',
+      'server/why-it-failed',
+      'server/logged',
+      'server/cut-short',
+      'server/one-after-another',
+      'server/where-the-time-went',
     ])
     expect(documented).toHaveLength(31 + 25)
     // Every rule names the package it comes from.
-    for (const id of ids) expect(id).toMatch(/^(core|query|router|start|devtools|vite)\//)
+    for (const id of ids) expect(id).toMatch(/^(core|query|router|start|devtools|server|vite)\//)
   })
 })
 

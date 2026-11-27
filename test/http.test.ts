@@ -106,6 +106,7 @@ describe('/mcp', () => {
         'get_query',
         'diff_query',
         'list_mutations',
+        'server_trace',
       ])
       expect(client.getServerVersion()?.name).toBe('loopsight')
       expect(client.getInstructions()).toMatch(/Start with overview/)

@@ -1,9 +1,9 @@
 import { loopsightVite } from '@loopsight/vite'
-import { tanstack } from './preset.js'
+import { defaults } from './preset.js'
 import type { LoopsightViteOptions } from '@loopsight/vite'
 import type { Plugin } from 'vite'
 
-export { tanstack } from './preset.js'
+export { defaults, tanstack } from './preset.js'
 export type { LoopsightViteOptions } from '@loopsight/vite'
 export type { SourceDescriptor } from '@loopsight/core/server'
 
@@ -21,7 +21,7 @@ export type { SourceDescriptor } from '@loopsight/core/server'
  * whichever of their libraries the app has installed.
  */
 export function loopsight(options: LoopsightViteOptions = {}): Plugin {
-  return loopsightVite({ ...options, sources: options.sources ?? tanstack() })
+  return loopsightVite({ ...options, sources: options.sources ?? defaults() })
 }
 
 export default loopsight

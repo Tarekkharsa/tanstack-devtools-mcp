@@ -1,3 +1,4 @@
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { ZodRawShape } from 'zod'
 import type { Hub, Session } from './hub.js'
 import type { KnownMessage, Rule, SlowKind } from './rules.js'
@@ -44,6 +45,19 @@ export interface ServerSource {
   rules?: ReadonlyArray<Rule>
   messages?: ReadonlyArray<KnownMessage>
   slow?: ReadonlyArray<SlowKind>
+  /**
+   * Takes an HTTP request made to the tool's own port, for a source that is
+   * sent data by something other than a page: a server exporting its traces.
+   * Returns false, having touched nothing, when the request is not its own.
+   * Requests from a browser origin never reach it.
+   */
+  http?: (request: IncomingMessage, response: ServerResponse, hub: Hub) => boolean
+  /**
+   * Whether the host should tag the requests it passes to the app's server
+   * (see `Hub.tag`). Asked per request, so a source can wait until it has
+   * something to tie the tags to.
+   */
+  tagRequests?: (hub: Hub) => boolean
 }
 
 /** Both halves of a source, as a host needs them to wire it up. */

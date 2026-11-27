@@ -109,6 +109,9 @@ importers:
       '@loopsight/core':
         specifier: workspace:*
         version: link:../core
+      '@loopsight/otel':
+        specifier: workspace:*
+        version: link:../otel
       '@loopsight/tanstack-devtools':
         specifier: workspace:*
         version: link:../tanstack-devtools
@@ -127,6 +130,15 @@ importers:
       vite:
         specifier: '>=6'
         version: 8.3.8(@types/node@24.19.4)(@vitejs/devtools@0.8.3)
+
+  packages/otel:
+    dependencies:
+      '@loopsight/core':
+        specifier: workspace:*
+        version: link:../core
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
 
   packages/tanstack-devtools:
     dependencies:

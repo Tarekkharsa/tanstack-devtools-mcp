@@ -247,7 +247,8 @@ interface DocumentState {
 }
 
 const CORE_SLOW: ReadonlyArray<SlowKind> = [
-  { source: 'network', types: ['ok', 'error'], floorMs: 2000, label: 'request', plural: 'requests' },
+  // The document is a request too, and the one a slow server render shows in.
+  { source: 'network', types: ['ok', 'error', 'document'], floorMs: 2000, label: 'request', plural: 'requests' },
 ]
 
 function sentence(words: Array<string>): string {

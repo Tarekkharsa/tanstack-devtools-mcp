@@ -25,6 +25,7 @@ export default defineConfig({
       "@loopsight/tanstack-start": here("./packages/tanstack-start/src/index.ts"),
       "@loopsight/tanstack-devtools/page": here("./packages/tanstack-devtools/src/page.ts"),
       "@loopsight/tanstack-devtools": here("./packages/tanstack-devtools/src/index.ts"),
+      "@loopsight/otel": here("./packages/otel/src/index.ts"),
     },
   },
 })

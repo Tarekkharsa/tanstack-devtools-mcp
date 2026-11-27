@@ -112,7 +112,7 @@ describe('standalone: false', () => {
     expect(vite.httpServer).toBeNull()
 
     const tools = await asDevtools(plugin)
-    expect(tools.size).toBe(16)
+    expect(tools.size).toBe(17)
 
     const page = await open(
       `ws://127.0.0.1:${port}/__loopsight/bridge`,

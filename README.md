@@ -117,7 +117,8 @@ if (import.meta.env.DEV) {
 | `@loopsight/tanstack-router` | A source: navigation events, two read tools, two actions, 12 rules. |
 | `@loopsight/tanstack-start` | A source: names server functions in the network log, and adds five rules. |
 | `@loopsight/tanstack-devtools` | A source: the TanStack Devtools event bus. |
-| `loopsight` | The preset: the Vite host with the four sources above, plus the `loopsight` command. |
+| `@loopsight/otel` | A source with no page half: the app's own server, from the OpenTelemetry traces and logs it exports. One tool, six rules. See [The server side](#the-server-side). |
+| `loopsight` | The preset: the Vite host with the five sources above, plus the `loopsight` command. |
 
 To choose the sources yourself, pass them. This is `loopsight()` spelled out:
 
@@ -238,6 +239,12 @@ From the TanStack Query and Router sources:
 | `get_router_state` | status, location, and each matched route's params, search, error and loader data |
 | `list_routes` | the routes, with a `contains` filter for large apps |
 
+From the server source, once the app's server exports here:
+
+| Tool | Does |
+| --- | --- |
+| `server_trace` | what the server did for one request the page made: each step with its time, each call out to another service, what failed, what it logged |
+
 With `actions: true`:
 
 | Tool | Does |
@@ -298,6 +305,15 @@ From the page itself, with no library involved:
 - links and controls with no accessible name, which is often content that failed to render
 - a request that has been in flight for over ten seconds
 
+From the server's own records, when it exports them (see [The server side](#the-server-side)):
+
+- calls out of the server that failed behind an answer the page took as a success
+- where a request the page saw fail went wrong on the server
+- what the server logged at warning level or above while answering the page
+- server work stopped before it finished, by a timeout or a time budget
+- steps that ran one after another, and the same call made over and over
+- where the time went in the slowest answers, down to the call that took it
+
 It also recognises 25 warnings and errors that TanStack Query, Router, Start and Vite print themselves, such as "Query data cannot be undefined" or "Mocked import used in dev client", and pairs each with its documented fix.
 
 Findings of severity `info` are judgment calls: a waterfall can be a real dependency, a late query can be data the page does not need at first. Their hint says when to ignore them. What can only be seen in source code is left to the linters: `@tanstack/eslint-plugin-query`, `@tanstack/eslint-plugin-router` and `eslint-plugin-react-refresh`.
@@ -308,10 +324,11 @@ Findings of severity `info` are judgment calls: a waterfall can be a real depend
 | --- | --- |
 | `query`, `mutation` | cache events, with the time each fetch took and the code that started it |
 | `router` | navigation events, with the time to resolve and any route error |
-| `network` | `fetch` and `XMLHttpRequest`: method, URL, status and time. Bodies and headers are never read. A source can name the requests it understands; the Start source shows server functions by name |
+| `network` | `fetch` and `XMLHttpRequest`: method, URL, status and time, and the request for the document itself with its time to first byte. Bodies are never read, and of the headers only the host's tag for the request. A source can name the requests it understands; the Start source shows server functions by name |
 | `console` | `console.error`, `console.warn`, uncaught errors and unhandled rejections. A message repeated within five seconds is recorded once, then once more with the count |
 | `vite` | from the Vite host: a module changed, a hot update, a full reload, a module that could not be updated in place and why, a build error, an error the dev server logged |
 | `bus` | TanStack Devtools event-bus events, when that panel is mounted |
+| `server` | from the server source: what the app's server did for a request (`trace`) and what it logged at warning level or above (`log`), each tied to the request the page made |
 
 The server keeps its own copy, 1,000 entries per session by default (`size`). `list_events`, `get_event`, `count_events` and `diagnose` answer from that copy, so they still work after a reload or a closed tab. A page that loads after a reload starts its log with the Vite event that caused it.
 
@@ -348,6 +365,43 @@ call_page_tool { "name": "cart.getCart" }
 ```
 
 In a browser without WebMCP, the page-side code defines a minimal `document.modelContext` so the registration has somewhere to go. In a browser with it, `registerTool` is wrapped and the browser still gets every tool.
+
+## The server side
+
+The page sees a request go out and an answer come back. What the server did in between, it cannot see: a server that answers 200 with less than it meant to send looks exactly like one that sent everything.
+
+If the app's server exports OpenTelemetry, point its exporter at loopsight and each request in the timeline is followed onto the server:
+
+```sh
+OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4777 OTEL_EXPORTER_OTLP_PROTOCOL=http/json vite dev
+```
+
+Use whatever setting your server reads for its OTLP endpoint; the address is the one Vite prints for loopsight, without `/mcp`. Nothing in the app changes.
+
+```
+list_events source=server
+ 92  server/log      WARN recommendations unavailable (for #1)
+105  server/trace    2208 ms  cart.load took 2208 ms on the server: 4 outbound calls, 3 failed (for #88)
+
+server_trace n=88
+→ cart.load 2208 ms
+    Prices.quote 400 ms +2
+      POST 390 ms +3 → POST pricing.example/v1/quote 400 FAILED: StatusCode error (400)
+    Prices.quote 1800 ms +2
+      POST 1790 ms +3 → POST pricing.example/v1/quote 200
+    Stock.check 150 ms +5 (stopped before finishing)
+```
+
+How the two sides are joined:
+
+- The Vite host gives each request to the app a tag as it passes through the dev server. The tag goes to the server as `x-request-id`, and as the trace id of a W3C `traceparent` header for servers that follow it. It comes back to the page in a `Server-Timing` entry named `loopsight`. Nothing a client already sent is replaced, and module, style, image and font requests are left alone.
+- A trace belongs to a request when its trace id is the tag, or when any of its spans carries the tag in an attribute, whatever the attribute is called. So a server that records the request id it was sent needs no trace-context support at all.
+- The document is joined the same way as a `fetch`, so a slow first byte is explained by what the server render waited on.
+- Tagging starts when the environment already points at loopsight's address, or else once the first export arrives.
+
+A shared load, such as a cache filling once for several requests, is a trace of its own and a child of none of them. It is shown under the step that waited on it, marked `~`, when it ran for most of that step's time: placed by timing, and said to be.
+
+Received: OTLP over HTTP as JSON, at `/v1/traces` and `/v1/logs`. Metrics are accepted and dropped. Protobuf is refused with a message that says to send JSON. Logs below warning level are not kept, and neither is any query string of an outbound call.
 
 ## With Vite DevTools
 
@@ -421,6 +475,7 @@ The server listens on `127.0.0.1` only and has no option to listen elsewhere.
 - `/mcp` refuses any request with an `Origin` header, so a web page cannot call the tools.
 - Both routes refuse a `Host` header that is not a loopback name, which stops DNS rebinding.
 - `/bridge` accepts WebSocket connections from loopback origins and the ones you list in `origins`.
+- `/v1/traces`, `/v1/logs` and `/v1/metrics` take what a server exports, and refuse any request with an `Origin` header, as `/mcp` does.
 
 With the Vite plugin the page's WebSocket goes to the dev server, which accepts it from loopback origins, from the page's own origin when the `Host` is one the Vite config allows (`server.allowedHosts`), and from the origins you list.
 
@@ -437,10 +492,10 @@ Not verified: the Vue, Solid, Svelte and Angular adapters, and Vite below 8. The
 Known limits:
 
 - **Server-rendered apps connect a moment late.** With no `index.html` to put a script in, the page connects through Vite's client, after the first modules have run. What it missed is summarised in an `attached` entry, and queries a server render sent along have no `usedAt` until a component reads them again.
-- **Nothing from the server side of an SSR app.** Loaders and server functions that run in Node are seen only as the requests the browser made.
+- **The server side needs the server to export.** Without OpenTelemetry on the server, loaders and server functions that run in Node are seen only as the requests the browser made. With it, what is seen is what the server chose to record; records arrive a few seconds behind, in the exporter's batches; and only JSON is read. With `standalone: false` there is no address to export to yet.
 - **No time travel.** Effect UI can repaint the page at any past entry because its state is one message log. Query and Router have no equivalent to replay; `diff_query` shows the last change only.
 - **No panel.** This has no UI of its own.
-- **Four built-in sources, all TanStack, and one host, Vite.** TanStack Form, Table, Store, Pacer and DB have none; nor do other state or data libraries. A library can register tools through `@tanstack/devtools-webmcp`, or be given a source as shown above. No source from outside this repository exists yet, so the contracts have been tried by one author only and may still change.
+- **Five built-in sources, four of them TanStack, and one host, Vite.** TanStack Form, Table, Store, Pacer and DB have none; nor do other state or data libraries. A library can register tools through `@tanstack/devtools-webmcp`, or be given a source as shown above. No source from outside this repository exists yet, so the contracts have been tried by one author only and may still change.
 - **`diagnose` reads what happened; it does not read your code.** Its rules are tied to documented mistakes, but their thresholds are heuristics, and a quiet result means nothing matched, not that nothing is wrong. TanStack Form and Table have no rules yet.
 
 ## Development

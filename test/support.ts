@@ -1,4 +1,5 @@
 import { CORE_RULES, collect, ruleContext } from '@loopsight/core/server'
+import { otelServerSource } from '@loopsight/otel'
 import { devtoolsServerSource } from '@loopsight/tanstack-devtools'
 import { queryServerSource } from '@loopsight/tanstack-query'
 import { routerServerSource } from '@loopsight/tanstack-router'
@@ -17,6 +18,7 @@ export const SOURCES: Array<ServerSource> = [
   queryServerSource,
   startServerSource,
   devtoolsServerSource,
+  otelServerSource,
   viteServerSource,
 ]
 

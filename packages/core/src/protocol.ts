@@ -9,6 +9,13 @@ export const SAME_SERVER_BRIDGE = '__loopsight/bridge'
 /** The page keeps its one bridge here, even when the page code loads twice. */
 export const GLOBAL_KEY = '__LOOPSIGHT__'
 export const PROTOCOL = 2
+/**
+ * How a host tells the page which request an answer belongs to: an entry of
+ * this name in the `Server-Timing` response header, whose description is the
+ * request's tag. The same tag goes to the server in `x-request-id`, so what
+ * the server records about the request can be tied to what the page saw.
+ */
+export const TAG_TIMING = 'loopsight'
 
 export interface PageToolInfo {
   name: string

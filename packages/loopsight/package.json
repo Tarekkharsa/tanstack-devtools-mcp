@@ -52,7 +52,8 @@
     "@loopsight/tanstack-query": "workspace:*",
     "@loopsight/tanstack-router": "workspace:*",
     "@loopsight/tanstack-start": "workspace:*",
-    "@loopsight/tanstack-devtools": "workspace:*"
+    "@loopsight/tanstack-devtools": "workspace:*",
+    "@loopsight/otel": "workspace:*"
   },
   "peerDependencies": {
     "vite": ">=6"

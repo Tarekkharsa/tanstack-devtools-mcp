@@ -2,7 +2,7 @@ import { startServer as startCore } from '@loopsight/core/server'
 import { serverSources } from './preset.js'
 import type { RunningServer, ServerOptions } from '@loopsight/core/server'
 
-export { serverSources, tanstack } from './preset.js'
+export { defaults, serverSources, tanstack } from './preset.js'
 export type { RunningServer, ServerOptions } from '@loopsight/core/server'
 
 /**

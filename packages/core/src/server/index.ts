@@ -1,5 +1,5 @@
 export { Hub } from './hub.js'
-export type { Connection, HubOptions, Session } from './hub.js'
+export type { Connection, HubOptions, RequestTag, Session } from './hub.js'
 export { createMcpServer, instructionsFor } from './mcp.js'
 export type { McpOptions } from './mcp.js'
 export { createBridge, isLoopbackName, startServer } from './http.js'
@@ -31,6 +31,7 @@ export {
   MCP_PATH,
   NAME,
   SAME_SERVER_BRIDGE,
+  TAG_TIMING,
 } from '../protocol.js'
 export type {
   EntrySource,

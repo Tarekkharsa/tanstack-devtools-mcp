@@ -379,7 +379,7 @@ try {
   await step("the tools are on Vite DevTools' route, next to its own", async () => {
     const { tools } = await viaDevtools.listTools()
     const ours = tools.filter((tool) => tool.name.startsWith('loopsight_'))
-    assert.equal(ours.length, 20, ours.map((tool) => tool.name).join(' '))
+    assert.equal(ours.length, 21, ours.map((tool) => tool.name).join(' '))
     assert.ok(tools.length > ours.length, 'Vite DevTools serves tools of its own')
     const navigate = ours.find((tool) => tool.name === 'loopsight_navigate')
     assert.deepEqual(navigate.inputSchema.required, ['to'])

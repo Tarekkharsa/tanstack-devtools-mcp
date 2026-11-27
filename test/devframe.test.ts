@@ -15,7 +15,7 @@ describe('the Vite DevTools adapter', () => {
   it('registers the same tools the standalone endpoint serves, with schema and safety', async () => {
     const { host, tools } = fakeHost()
     const ids = await registerOnAgentHost(host, new Hub(), { sources: SOURCES })
-    expect(ids).toHaveLength(16)
+    expect(ids).toHaveLength(17)
     expect(ids).toEqual([...tools.keys()])
     expect(ids).toContain('loopsight:wait_for_update')
     expect(ids).not.toContain('loopsight:navigate')
@@ -41,7 +41,7 @@ describe('the Vite DevTools adapter', () => {
   it('adds the action tools only when actions are on', async () => {
     const { host, tools } = fakeHost()
     const ids = await registerOnAgentHost(host, new Hub(), { actions: true, sources: SOURCES })
-    expect(ids).toHaveLength(20)
+    expect(ids).toHaveLength(21)
     expect(tools.get('loopsight:navigate')!.safety).toBe('action')
   })
 

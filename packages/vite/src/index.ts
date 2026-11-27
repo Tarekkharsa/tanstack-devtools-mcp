@@ -14,6 +14,7 @@ import {
 } from '@loopsight/core/server'
 import { VITE_FRAMES, VITE_REQUESTS } from './page.js'
 import { viteServerSource } from './rules.js'
+import { pointedHere, tagRequests } from './tag.js'
 import type { Plugin, ViteDevServer } from 'vite'
 import type {
   Frame,
@@ -417,6 +418,13 @@ export function loopsightVite(options: LoopsightViteOptions = {}): Plugin {
           print()
           logger.info(`  ➜  ${NAME} MCP: ${mcpUrl}`)
           logger.info(`  ➜  ${NAME} sources: ${active.map((source) => source.key).join(', ') || 'none'}`)
+          if (serverSources.some((source) => source.http !== undefined)) {
+            logger.info(
+              pointedHere(running?.port ?? -1)
+                ? `  ➜  ${NAME} server records: expected at ${mcpUrl.replace(/\/mcp$/, '')}`
+                : `  ➜  ${NAME} server records: none yet. Send OTLP/HTTP JSON to ${mcpUrl.replace(/\/mcp$/, '')}`,
+            )
+          }
         }
       } else {
         // No port of our own: the page reaches the hub through the dev
@@ -442,6 +450,9 @@ export function loopsightVite(options: LoopsightViteOptions = {}): Plugin {
         else http.once('listening', warnIfUnserved)
       }
       recordVite(server, hub)
+      const port = running?.port
+      const expected = port !== undefined && pointedHere(port)
+      tagRequests(server, hub, () => serverSources, () => expected)
     },
 
     // The page-side modules are served from memory, read from the built

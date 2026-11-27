@@ -49,6 +49,9 @@
       ],
       "@loopsight/tanstack-devtools": [
         "./packages/tanstack-devtools/src/index.ts"
+      ],
+      "@loopsight/otel": [
+        "./packages/otel/src/index.ts"
       ]
     }
   },

@@ -215,6 +215,13 @@ export function startServer(options: ServerOptions = {}): Promise<RunningServer>
       })
       return
     }
+    // What a source receives on this port. A page must not be able to post
+    // here, so a browser origin is refused as it is for the tools.
+    if (request.headers.origin === undefined) {
+      for (const source of options.sources ?? []) {
+        if (source.http?.(request, response, hub)) return
+      }
+    }
     if (path === '/' && request.method === 'GET') {
       json(response, 200, {
         name: NAME,

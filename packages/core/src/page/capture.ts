@@ -1,6 +1,7 @@
 import { noteFailedImage } from './document.js'
 import { brief } from './serialize.js'
 import { appFrames, here } from './stack.js'
+import { TAG_TIMING } from '../protocol.js'
 import type { Frame } from '../protocol.js'
 import type { RequestAnnotator } from './source.js'
 import type { Recorder } from './types.js'
@@ -237,9 +238,54 @@ export interface NetworkOptions {
   ignore?: ReadonlyArray<string>
 }
 
+/** The host's tag for a request, from the `Server-Timing` header of its answer. */
+function tagIn(header: string | null): string | undefined {
+  if (!header) return undefined
+  const match = new RegExp(`(?:^|,)\\s*${TAG_TIMING}\\s*;\\s*desc="?([\\w.-]{1,128})"?`).exec(header)
+  return match?.[1]
+}
+
+const DOCUMENT_RECORDED = Symbol.for('loopsight.document')
+
+/**
+ * Records the request for the document itself, once per page load: the one
+ * request the page did not make from code, and the one a server render
+ * holds up.
+ */
+function recordDocument(record: Recorder): void {
+  try {
+    const marks = window as unknown as Record<symbol, boolean>
+    if (marks[DOCUMENT_RECORDED]) return
+    const navigation = performance.getEntriesByType?.('navigation')[0] as
+      | (PerformanceNavigationTiming & { responseStatus?: number })
+      | undefined
+    if (!navigation || !(navigation.responseStart > 0)) return
+    marks[DOCUMENT_RECORDED] = true
+    const status = navigation.responseStatus
+    const tag = (navigation.serverTiming ?? []).find((timing) => timing.name === TAG_TIMING)
+    const wait = Math.round(navigation.responseStart - navigation.requestStart)
+    record({
+      source: 'network',
+      type: 'document',
+      key: location.pathname,
+      summary: `GET ${cut(location.pathname + location.search, 300)} → ${status || 'loaded'} (the document; first byte after ${wait} ms)`,
+      dur: Math.round(navigation.responseEnd - navigation.requestStart),
+      detail: {
+        kind: 'document',
+        ...(status ? { status } : {}),
+        wait,
+        ...(tag?.description ? { tag: tag.description } : {}),
+      },
+    })
+  } catch {
+    // The page works the same without this entry.
+  }
+}
+
 /**
  * Records `fetch` and `XMLHttpRequest` calls: method, URL, status and time.
- * Bodies and headers are never read.
+ * Bodies are never read, and of the headers only the host's tag for the
+ * request, in the answer from the app's own server.
  */
 export function recordNetwork(
   record: Recorder,
@@ -265,15 +311,16 @@ export function recordNetwork(
       const id = fingerprint(url.href)
       for (const annotate of annotators) {
         const named = annotate(url, same)
-        if (named) return { key: named.key, shown: cut(named.shown, 300), id }
+        if (named) return { key: named.key, shown: cut(named.shown, 300), id, same }
       }
       return {
         key: url.pathname,
         shown: cut((same ? '' : url.origin) + url.pathname + url.search, 300),
         id,
+        same,
       }
     } catch {
-      return { key: raw.slice(0, 120), shown: raw.slice(0, 300), id: fingerprint(raw) }
+      return { key: raw.slice(0, 120), shown: raw.slice(0, 300), id: fingerprint(raw), same: false }
     }
   }
 
@@ -288,7 +335,7 @@ export function recordNetwork(
     kind: 'fetch' | 'xhr',
     method: string,
     target: { key: string; shown: string; id: string },
-    outcome: { status: number } | { failure: string; aborted?: boolean },
+    outcome: { status: number; tag?: string | undefined } | { failure: string; aborted?: boolean },
     frames: Array<Frame>,
   ) => {
     const started = open.get(id)
@@ -306,10 +353,19 @@ export function recordNetwork(
       key: target.key,
       summary: `${method} ${target.shown} → ${aborted ? 'aborted' : failed ? outcome.failure : status}`,
       ...(dur !== undefined ? { dur } : {}),
-      detail: { kind, ...(failed ? {} : { status }), id: `${method} ${target.id}` },
+      detail: {
+        kind,
+        ...(failed ? {} : { status }),
+        id: `${method} ${target.id}`,
+        // The host's name for this request, which the server's own records
+        // of it carry too.
+        ...(!failed && outcome.tag ? { tag: outcome.tag } : {}),
+      },
       ...(frames.length > 0 ? { frames } : {}),
     })
   }
+
+  recordDocument(record)
 
   const originalFetch = window.fetch
   const patchedFetch: typeof window.fetch = function (this: unknown, input, init) {
@@ -325,7 +381,15 @@ export function recordNetwork(
         const frames = here()
         const id = begin(`${method} ${target.shown}`)
         promise.then(
-          (response) => finish(id, 'fetch', method, target, { status: response.status }, frames),
+          (response) =>
+            finish(
+              id,
+              'fetch',
+              method,
+              target,
+              { status: response.status, tag: target.same ? tagIn(response.headers.get('server-timing')) : undefined },
+              frames,
+            ),
           (error) =>
             finish(
               id,
@@ -368,7 +432,14 @@ export function recordNetwork(
                 'xhr',
                 info.method,
                 target,
-                this.status === 0 ? { failure: 'no response' } : { status: this.status },
+                this.status === 0
+                  ? { failure: 'no response' }
+                  : {
+                      status: this.status,
+                      // Asked only of the app's own server: for another
+                      // origin the browser logs a refusal.
+                      tag: target.same ? tagIn(this.getResponseHeader('server-timing')) : undefined,
+                    },
                 frames,
               ),
             { once: true },

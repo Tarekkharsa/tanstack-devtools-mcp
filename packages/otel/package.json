@@ -1,0 +1,32 @@
+{
+  "name": "@loopsight/otel",
+  "description": "What the app's server did for each request, from its OpenTelemetry traces and logs, as a loopsight source.",
+  "version": "0.0.0",
+  "type": "module",
+  "license": "MIT",
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20.19"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tarekkharsa/loopsight.git",
+    "directory": "packages/otel"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@loopsight/core": "workspace:*",
+    "zod": "^4.6.7"
+  }
+}
