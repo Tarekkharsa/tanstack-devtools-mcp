@@ -24,6 +24,11 @@ export interface Finding {
   /** The id of the rule that produced it. */
   rule?: string
   /**
+   * Evidence left out to keep the finding short. It is not sent to the
+   * agent; it is what another page's finding is compared against.
+   */
+  more?: Array<string>
+  /**
    * What it is about, for a rule that reports one finding per thing: a query
    * key, a file. It pairs a finding with the plainer one it replaces (see
    * `supersedes`) and is not sent to the agent.
@@ -104,6 +109,65 @@ export function clip(text: string, chars = 220): string {
 
 export function where(entry: LogEntry): string {
   return entry.at?.[0] ? ` — from ${entry.at[0]}` : ''
+}
+
+/** The page half's `Mismatch`: what React said differed when hydration failed. */
+interface Mismatch {
+  element?: string
+  client: Array<string>
+  server: Array<string>
+  within: Array<string>
+}
+
+const LOADING = /skeleton|loading|placeholder|pending|spinner|fallback|shimmer/i
+
+/** Console entries that report a hydration failure, oldest first. */
+export function hydrationFailures(context: Pick<RuleContext, 'by'>): Array<LogEntry> {
+  return context
+    .by('console', 'error', 'warn', 'uncaught')
+    .filter((entry) => /hydrat/i.test(entry.summary))
+}
+
+/**
+ * A hydration failure as a finding. React names the element and what each
+ * side rendered at the end of its message; when the page kept that, it is
+ * the evidence, and the generic text is not.
+ */
+export function hydrationFinding(
+  failures: Array<LogEntry>,
+): Omit<Finding, 'fix' | 'docs' | 'rule'> {
+  const last = failures.at(-1)!
+  const told = failures.findLast(
+    (entry) => (entry.detail as { mismatch?: Mismatch } | undefined)?.mismatch,
+  )
+  const mismatch = (told?.detail as { mismatch?: Mismatch } | undefined)?.mismatch
+  if (!mismatch) {
+    return {
+      severity: 'error',
+      title: 'Hydration mismatch between the server render and the client',
+      entries: numbers(failures),
+      evidence: [clip(last.summary, 400) + where(last)],
+    }
+  }
+  const inside = mismatch.within.length > 0 ? ` inside ${mismatch.within.join(' > ')}` : ''
+  const waiting =
+    mismatch.server.some((line) => LOADING.test(line)) &&
+    !mismatch.client.some((line) => LOADING.test(line))
+  return {
+    severity: 'error',
+    title: 'Hydration mismatch between the server render and the client',
+    entries: numbers(failures),
+    evidence: [
+      `on ${mismatch.element ?? 'an element'}${inside}`,
+      ...mismatch.client.map((line) => `browser rendered: ${line}`),
+      ...mismatch.server.map((line) => `server had sent: ${line}`),
+    ],
+    ...(waiting
+      ? {
+          hint: 'The server sent a loading state where the browser rendered content, so data this part reads was not in the server render and reached the browser before the part hydrated. Look for the query or loader it reads.',
+        }
+      : {}),
+  }
 }
 
 export const numbers = (entries: Array<LogEntry>) =>

@@ -27,6 +27,11 @@ export interface Session {
   /** The highest page-side sequence number received. */
   pageSeq: number
   connection: Connection | undefined
+  /**
+   * What the page last said about itself when asked, kept so its findings
+   * can still be compared with another page's after it has closed.
+   */
+  facts?: unknown
 }
 
 export interface HubOptions {
@@ -80,6 +85,7 @@ interface Pending {
  */
 export class Hub {
   readonly sessions = new Map<string, Session>()
+  readonly #factTimers = new WeakMap<Session, ReturnType<typeof setTimeout>>()
   readonly #size: number
   readonly #keep: number
   readonly #callTimeoutMs: number
@@ -116,6 +122,7 @@ export class Hub {
         session.info = { ...session.info, ...message.patch }
       } else if (message.kind === 'entries') {
         this.#ingest(session, message.entries)
+        this.#rememberFacts(session)
       } else if (message.kind === 'result') {
         this.#settle(message)
       }
@@ -295,6 +302,28 @@ export class Hub {
       )
     }
     return session
+  }
+
+  /**
+   * Asks a page what it says about itself once it has been quiet for a
+   * moment, and keeps the answer. A page that has closed cannot be asked, and
+   * comparing two pages needs both.
+   */
+  #rememberFacts(session: Session): void {
+    const timers = this.#factTimers
+    clearTimeout(timers.get(session))
+    const timer = setTimeout(() => {
+      timers.delete(session)
+      if (!session.connected) return
+      this.call(session, 'page.facts', {}, 5000).then(
+        (facts) => {
+          session.facts = facts
+        },
+        () => {},
+      )
+    }, 2500)
+    timer.unref?.()
+    timers.set(session, timer)
   }
 
   /** Calls a method on a session's page and resolves with its answer. */

@@ -34,7 +34,10 @@ interface Memory {
   sites: Map<string, Array<Frame>>
   /** Stack captures spent on this query; they stop at a small budget. */
   looks: number
-  /** In the cache before the page connected, as a server render leaves it. */
+  /**
+   * Came holding its data without a fetch here: in the cache before the page
+   * connected, or added to it with data, as a server render leaves it.
+   */
   preloaded: boolean
   /** Fetches started since the page connected. */
   fetches: number
@@ -398,7 +401,25 @@ export function recordQuery(
     if (event.type === 'added') {
       const frames = here()
       noteSite(query, frames)
-      record({ source: 'query', type: 'added', key, summary: `${key} added`, frames })
+      // A cache filled after the page connected, as a streamed server render
+      // fills it, adds each query already holding its data. A query given
+      // `initialData` holds data too, and that came from the app.
+      const sent =
+        query.state?.data !== undefined &&
+        Number(query.state?.dataUpdatedAt) > 0 &&
+        query.options?.initialData === undefined
+      if (sent) {
+        memoryOf(query).preloaded = true
+        noteData(query)
+      }
+      record({
+        source: 'query',
+        type: 'added',
+        key,
+        summary: `${key} added${sent ? ' with its data' : ''}`,
+        ...(sent ? { detail: { sent: true } } : {}),
+        frames,
+      })
       return
     }
     if (event.type === 'removed') {

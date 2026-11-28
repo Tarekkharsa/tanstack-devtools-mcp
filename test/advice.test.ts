@@ -100,7 +100,7 @@ describe('the catalogue', () => {
       'server/one-after-another',
       'server/where-the-time-went',
     ])
-    expect(documented).toHaveLength(31 + 25)
+    expect(documented).toHaveLength(34 + 25)
     // Every rule names the package it comes from.
     for (const id of ids) expect(id).toMatch(/^(core|query|router|start|devtools|server|vite)\//)
   })

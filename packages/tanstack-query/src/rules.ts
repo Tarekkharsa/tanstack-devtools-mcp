@@ -1,4 +1,4 @@
-import { burst, clip, groups, numbers, where } from '@loopsight/core/server'
+import { burst, clip, groups, hydrationFailures, numbers, where } from '@loopsight/core/server'
 import type {
   KnownMessage,
   LogEntry,
@@ -114,6 +114,95 @@ function fetchWindows(context: RuleContext) {
   })
 }
 
+/** A query hash is its key as JSON; anything else has no parts to compare. */
+function keyParts(queryHash: string): Array<string> | undefined {
+  try {
+    const key = JSON.parse(queryHash) as unknown
+    return Array.isArray(key) ? key.map((part) => JSON.stringify(part)) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Where two keys of one length differ, when they differ in one place only
+ * and that place holds parameters: an object or an array on either side.
+ * Two keys that differ in a name or an id are two different things.
+ */
+function oneDifference(a: Array<string>, b: Array<string>): number | undefined {
+  if (a.length !== b.length || a.length < 2) return undefined
+  const different = a.flatMap((part, index) => (part === b[index] ? [] : [index]))
+  if (different.length !== 1) return undefined
+  const at = different[0]!
+  const parameters = (part: string) => part.startsWith('{') || part.startsWith('[')
+  return parameters(a[at]!) || parameters(b[at]!) ? at : undefined
+}
+
+/**
+ * When the server-rendered cache reached the page: the entry that says what
+ * was in it at connect, or the first query added already holding its data.
+ */
+function serverRender(context: RuleContext): LogEntry | undefined {
+  return (
+    context.by('query', 'attached')[0] ??
+    context.by('query', 'added').find((entry) => (entry.detail as { sent?: boolean } | undefined)?.sent)
+  )
+}
+
+/** A key short enough to compare by eye: long objects and arrays shrink to their size. */
+function shortKey(queryHash: string): string {
+  const parts = keyParts(queryHash)
+  if (!parts) return clip(queryHash, 160)
+  const small = parts.map((part) => {
+    if (part.length <= 48) return part
+    try {
+      const value = JSON.parse(part) as unknown
+      if (Array.isArray(value)) return `[${value.length} ${value.length === 1 ? 'item' : 'items'}]`
+      if (value && typeof value === 'object') return `{${Object.keys(value).slice(0, 4).join(', ')}${Object.keys(value).length > 4 ? ', …' : ''}}`
+    } catch {
+      // Not JSON after all: show its start.
+    }
+    return clip(part, 48)
+  })
+  return `[${small.join(',')}]`
+}
+
+/**
+ * A query the server render sent that nothing on the page reads, next to one
+ * the page reads and had to fetch, when the two keys differ in one place.
+ */
+function underAnotherKey(context: RuleContext) {
+  const setup = facts(context)
+  const attached = serverRender(context)
+  if (!setup || !attached) return []
+  const fetches = context.by('query', 'fetch')
+  const unread = setup.queries.filter(
+    (query) => query.preloaded && query.hasData && query.fetches === 0 && query.observers.length === 0,
+  )
+  const pairs: Array<{ sent: QueryFact; read: QueryFact; fetch: LogEntry }> = []
+  for (const read of setup.queries) {
+    if (read.preloaded || read.observers.length === 0) continue
+    const parts = keyParts(read.queryHash)
+    // Fetched as the page loaded, not on a later navigation to other data.
+    const fetch = fetches.find(
+      (entry) => entry.key === read.queryHash && !isRefetch(entry) && entry.t - attached.t <= LOAD_MS,
+    )
+    if (!parts || !fetch) continue
+    const sent = unread.find((query) => {
+      const other = keyParts(query.queryHash)
+      return other !== undefined && oneDifference(parts, other) !== undefined
+    })
+    if (sent) pairs.push({ sent, read, fetch })
+  }
+  return pairs
+}
+
+/** How long after the page connects a first fetch still counts as part of its load. */
+const LOAD_MS = 10_000
+
+/** A network entry's request, as the page fingerprints it: method and whole URL. */
+const requestId = (entry: LogEntry) => (entry.detail as { id?: string } | undefined)?.id
+
 export const QUERY_RULES: Array<Rule> = [
   {
     id: 'query/in-error',
@@ -186,7 +275,7 @@ export const QUERY_RULES: Array<Rule> = [
       const setup = facts(context)
       if (!setup) return []
       const known = factsByHash(setup)
-      const attached = context.by('query', 'attached')[0]
+      const attached = serverRender(context)
       if (!attached) return []
       const invalidations = context.by('query', 'invalidate')
       const again = context.by('query', 'fetch').filter((fetch) => {
@@ -245,6 +334,130 @@ export const QUERY_RULES: Array<Rule> = [
           `second fetch${where(second) || ' — source unknown'}`,
         ],
       }))
+    },
+  },
+  {
+    id: 'query/prefetched-under-another-key',
+    supersedes: ['query/missing-from-document'],
+    fix: 'Prefetch on the server under exactly the key the component reads. Build the key in one place (a `queryOptions` object) and pass that to both the loader or prefetch call and `useQuery`. Data prefetched under any other key is sent to the browser and never used, and the component renders its loading state on the server and fetches again in the browser.',
+    docs: SSR,
+    check: (context) => {
+      const failed = hydrationFailures(context).length > 0
+      return underAnotherKey(context)
+        .slice(0, 3)
+        .map(({ sent, read, fetch }) => ({
+          severity: 'warning' as const,
+          title: 'The server render loaded a query nothing reads; the page reads it under another key',
+          subject: read.queryHash,
+          entries: [fetch.n],
+          evidence: [
+            `sent by the server, read by no component: ${clip(sent.queryHash, 260)}`,
+            `read by the page, fetched in the browser: ${clip(read.queryHash, 260)}${where(fetch)}`,
+          ],
+          hint: failed
+            ? 'This page also failed hydration. A query the server did not have renders its loading state there and its data in the browser, which is such a mismatch.'
+            : 'Right as it is if the two keys are different data on purpose.',
+        }))
+    },
+  },
+  {
+    id: 'query/missing-from-document',
+    fix: 'Load the query on the server under the key the component reads (`prefetchQuery` or `ensureQueryData` in the loader, then dehydrate), so the server renders the same data the browser has. If it cannot be loaded there, render that part only after hydration.',
+    docs: SSR,
+    check: (context) => {
+      // Only worth saying when the page did fail hydration: a query fetched
+      // in the browser alone is an ordinary thing.
+      const failure = hydrationFailures(context)[0]
+      const attached = serverRender(context)
+      const setup = facts(context)
+      if (!failure || !attached || !setup) return []
+      // A query read under another key than the server loaded says it better.
+      if (underAnotherKey(context).length > 0) return []
+      const known = factsByHash(setup)
+      const loaded = fetchWindows(context).filter(({ start, end }) => {
+        const query = known.get(start.key ?? '')
+        return (
+          query !== undefined &&
+          !query.preloaded &&
+          query.observers.length > 0 &&
+          !isRefetch(start) &&
+          start.n > attached.n &&
+          end.type === 'success' &&
+          end.n < failure.n
+        )
+      })
+      // The one that arrived last before the failure is the likeliest.
+      return loaded
+        .sort((a, b) => b.end.n - a.end.n)
+        .slice(0, 3)
+        .map(({ start, end }) => ({
+          severity: 'warning' as const,
+          title: 'A query missing from the server render had loaded in the browser before hydration failed',
+          subject: start.key ?? '',
+          entries: [start.n, end.n, failure.n],
+          evidence: [
+            `${clip(start.key ?? '', 200)}${where(start)}`,
+            `fetched in the browser in ${end.dur ?? '?'} ms, ${failure.t - end.t} ms before the hydration error`,
+          ],
+          hint: 'The server rendered this query as loading. If the part that failed hydration reads it, that is the mismatch.',
+        }))
+    },
+  },
+  {
+    id: 'query/same-request-two-keys',
+    fix: 'Give each piece of server data one query key and read it through that key everywhere. A query that combines several pieces should read them from their own cache entries (`useQueries`, or `queryClient.fetchQuery` inside its `queryFn`) instead of calling the server again, so data already fetched is reused.',
+    docs: QUERY_KEYS,
+    check: (context) => {
+      const windows = fetchWindows(context)
+      const requests = context
+        .by('network', 'ok')
+        .filter((entry) => entry.dur !== undefined && /^GET /.test(entry.summary) && requestId(entry))
+      const findings = []
+      for (const [, list] of groups(requests, (entry) => requestId(entry)!)) {
+        if (list.length < 2) continue
+        const made = list
+          .map((entry) => {
+            const began = entry.t - (entry.dur ?? 0)
+            return {
+              entry,
+              began,
+              // Query fetches in progress when the request left.
+              fetching: windows.filter(({ start, end }) => start.t <= began + 5 && end.t >= began),
+            }
+          })
+          .map((item) => ({ ...item, keys: item.fetching.map(({ key }) => key) }))
+          .sort((a, b) => a.began - b.began)
+        // Asked again, after an answer, by fetches of other keys only.
+        const again = made.filter((later, index) =>
+          made
+            .slice(0, index)
+            .some(
+              (earlier) =>
+                earlier.entry.t <= later.began &&
+                earlier.keys.length > 0 &&
+                later.keys.length > 0 &&
+                !later.keys.some((key) => earlier.keys.includes(key)),
+            ),
+        )
+        if (again.length === 0) continue
+        const keys = [...new Set(made.flatMap((item) => item.keys))]
+        const sure = made.every((item) => item.keys.length === 1)
+        const fetchOf = (key: string) =>
+          made.flatMap((item) => item.fetching).find((window) => window.key === key)!.start
+        findings.push({
+          severity: sure ? ('warning' as const) : ('info' as const),
+          title: `One request was sent ${made.length} times, by queries under ${keys.length} different keys`,
+          entries: numbers(made.map((item) => item.entry)),
+          evidence: [
+            clip(list.at(-1)!.summary.replace(/ → [^→]*$/, ''), 200) + where(list.at(-1)!),
+            ...keys.slice(0, 4).map((key) => `while fetching ${shortKey(key)}${where(fetchOf(key))}`),
+          ],
+          ...(sure
+            ? {}
+            : { hint: 'Other queries were fetching at the same moments, so which one sent the request is a guess. Check the keys listed.' }),
+        })
+      }
+      return findings
     },
   },
   {

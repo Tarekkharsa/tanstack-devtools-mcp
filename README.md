@@ -113,7 +113,7 @@ if (import.meta.env.DEV) {
 | --- | --- |
 | `@loopsight/core` | The page bridge, the session log, the rule engine and the ten tools that need no library: the timeline, `diagnose`, the waits, sessions and page tools. It records the console and the network by itself. |
 | `@loopsight/vite` | The host for Vite. Connects every page, records hot updates, reloads and build errors, maps stack frames to source lines, and registers the tools with Vite DevTools when it is on. |
-| `@loopsight/tanstack-query` | A source: cache and mutation events, four read tools, two actions, 15 rules. |
+| `@loopsight/tanstack-query` | A source: cache and mutation events, four read tools, two actions, 18 rules. |
 | `@loopsight/tanstack-router` | A source: navigation events, two read tools, two actions, 12 rules. |
 | `@loopsight/tanstack-start` | A source: names server functions in the network log, and adds five rules. |
 | `@loopsight/tanstack-devtools` | A source: the TanStack Devtools event bus. |
@@ -258,11 +258,16 @@ With `actions: true`:
 
 The core reports plain failures by itself: a build error, an uncaught error, a failed request, the same request in flight twice. Each source adds its own, and every finding names its rule (`query/hydrated-refetch`, `vite/fast-refresh-defeated`).
 
+A warning that pages at other paths of the app report too is rarely about the page in front of the agent: a third-party script that throws, a logo that never loads, something the server logs on every request. `diagnose` names those under `standing` and shows their evidence only when asked with `all: true`. Where only part of a finding is shared, the shared lines are counted and the rest shown. Errors are never folded away.
+
 Every rule below comes from a library's own material, and each finding carries a `fix` restating it and a `docs` reference: a URL, or the path of an agent skill the library ships inside its npm package, which an agent can open in `node_modules`. The thresholds (how many fetches, how many milliseconds) are this project's; the sources give none.
 
 From the TanStack Query guides:
 
 - data sent by the server render fetched again as the page loads
+- a query the server render loaded under one key while the page reads it under another, so the server renders the loading state and the browser fetches
+- on a page that failed hydration, the queries that were missing from the server render and had loaded in the browser by then
+- one request sent again and again by queries under different keys, where one cache entry would do
 - a prefetch or loader fetch followed by a second fetch when the component mounts
 - a failed HTTP response inside a query that ended as a success
 - a query with no `staleTime` fetching again and again
@@ -289,7 +294,7 @@ From the skills shipped in `@tanstack/react-router` and `@tanstack/router-core`:
 
 From the skills shipped in the TanStack Start packages, the `@vitejs/plugin-react` README and Vite's troubleshooting guide:
 
-- a hydration mismatch
+- a hydration mismatch, with the element it is on, the components around it, and what the browser rendered against what the server sent, read from the end of React's message
 - a child route setting `ssr: true` under a parent that turned it down
 - a loader fetching the app's own `/api/...` over HTTP instead of calling a server function
 - server functions running one after another

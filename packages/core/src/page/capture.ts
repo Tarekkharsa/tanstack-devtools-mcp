@@ -125,6 +125,68 @@ export function captureTools(
  * code they came from. A message repeated within five seconds is recorded
  * once, then once more with the count.
  */
+/** What React says differed when hydration failed, read from its message. */
+export interface Mismatch {
+  /** The element the difference is on, as React printed its opening. */
+  element?: string
+  /** What the browser rendered, one changed line each. */
+  client: Array<string>
+  /** What the server had sent in its place. */
+  server: Array<string>
+  /** The components around it, outermost first. */
+  within: Array<string>
+}
+
+const short = (line: string) => (line.length > 180 ? `${line.slice(0, 180)}…` : line)
+
+/**
+ * React ends a hydration error with the component tree and marks the lines
+ * that differ: `+` for the browser's render, `-` for the server's HTML. A
+ * log line cut to a few hundred characters loses exactly that part.
+ */
+export function hydrationMismatch(text: string): Mismatch | undefined {
+  if (!/hydrat/i.test(text)) return undefined
+  const all = text.split('\n')
+  // The tree is indented; the list of usual causes above it is not, and its
+  // bullets start with a dash too.
+  const tree = all.findIndex((line) => /^\s+(?:\.\.\.|<)/.test(line))
+  if (tree < 0) return undefined
+  const lines = all.slice(tree)
+  const first = lines.findIndex((line) => /^[+-]\s{2,}\S/.test(line))
+  if (first < 0) return undefined
+  const client: Array<string> = []
+  const server: Array<string> = []
+  for (const line of lines.slice(first)) {
+    const mark = /^([+-])\s{2,}(\S.*)$/.exec(line)
+    if (!mark) continue
+    const list = mark[1] === '+' ? client : server
+    if (list.length < 4) list.push(short(mark[2]!.trim()))
+  }
+  const within: Array<string> = []
+  let element: string | undefined
+  for (const line of lines.slice(0, first)) {
+    const tag = /^\s+<([A-Za-z][\w.]*)/.exec(line)
+    if (!tag) continue
+    if (/^[A-Z]/.test(tag[1]!)) {
+      if (within.at(-1) !== tag[1]) within.push(tag[1]!)
+    }
+    element = short(line.trim())
+  }
+  return {
+    ...(element !== undefined ? { element } : {}),
+    client,
+    server,
+    within: within.slice(-6),
+  }
+}
+
+/** The whole text of what was logged, before anything is cut. */
+function whole(args: Array<unknown>): string {
+  return args
+    .map((arg) => (typeof arg === 'string' ? arg : arg instanceof Error ? arg.message : ''))
+    .join(' ')
+}
+
 export function recordConsole(record: Recorder): () => void {
   const levels = ['error', 'warn'] as const
   const originals = { error: console.error, warn: console.warn }
@@ -169,10 +231,12 @@ export function recordConsole(record: Recorder): () => void {
   for (const level of levels) {
     console[level] = (...args: Array<unknown>) => {
       try {
+        const mismatch = hydrationMismatch(whole(args))
         note(
           level,
           args.map((arg) => brief(arg, 400)).join(' ').slice(0, 1200),
           framesFor(args),
+          mismatch ? { mismatch } : undefined,
         )
       } catch {
         // Recording must never break the app's own logging.
@@ -181,11 +245,15 @@ export function recordConsole(record: Recorder): () => void {
     }
   }
   const onError = (event: ErrorEvent) => {
+    const mismatch = hydrationMismatch(whole([event.error ?? event.message]))
+    const at = event.filename
+      ? { file: event.filename, line: event.lineno, column: event.colno }
+      : undefined
     note(
       'uncaught',
       brief(event.error ?? event.message, 800),
       appFrames(event.error?.stack),
-      event.filename ? { file: event.filename, line: event.lineno, column: event.colno } : undefined,
+      mismatch ? { ...at, mismatch } : at,
     )
   }
   const onRejection = (event: PromiseRejectionEvent) => {

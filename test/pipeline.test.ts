@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
-import { QueryClient, QueryObserver } from '@tanstack/query-core'
+import { QueryClient, QueryObserver, dehydrate, hydrate } from '@tanstack/query-core'
 import {
   createMemoryHistory,
   createRootRoute,
@@ -11,6 +11,7 @@ import {
 } from '@tanstack/react-router'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Hub, createMcpServer } from '@loopsight/core/server'
+import { queryFacts } from '@loopsight/tanstack-query/page'
 import { connect } from 'loopsight/client'
 import { SOURCES } from './support.js'
 import type { SocketLike } from '@loopsight/core/page'
@@ -517,6 +518,26 @@ describe('what changed', () => {
       type: 'attached',
       summary: '2 queries already in the cache: 2 success',
     })
+  })
+
+  it('tells a query the server render sent from one the page made, when the cache fills after connecting', async () => {
+    const server = new QueryClient()
+    server.setQueryData(['sent'], { from: 'server' })
+    const queryClient = new QueryClient()
+    const { call } = await setup({ queryClient })
+    // A streamed server render hydrates the cache once the page is running.
+    hydrate(queryClient, dehydrate(server))
+    queryClient.setQueryData(['made'], 1)
+    await queryClient.prefetchQuery({ queryKey: ['fetched'], queryFn: () => 1 })
+    await sleep(120)
+    const { entries } = await call('list_events', { source: 'query', type: 'added' })
+    expect(entries.map((entry: any) => entry.summary)).toEqual([
+      '["sent"] added with its data',
+      '["made"] added',
+      '["fetched"] added',
+    ])
+    const facts = queryFacts(queryClient).queries.map((query) => [query.queryHash, query.preloaded])
+    expect(facts).toEqual([['["sent"]', true], ['["made"]', false], ['["fetched"]', false]])
   })
 })
 

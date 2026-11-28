@@ -1,4 +1,12 @@
-import { clip, numbers, ruleContext, runRules, where } from './rules.js'
+import {
+  clip,
+  hydrationFailures,
+  hydrationFinding,
+  numbers,
+  ruleContext,
+  runRules,
+  where,
+} from './rules.js'
 import type { LogEntry } from '../protocol.js'
 import type {
   Finding,
@@ -89,25 +97,19 @@ export const CORE_RULES: ReadonlyArray<Rule> = [
   },
   {
     id: 'core/hydration-mismatch',
-    check: ({ by }) => {
-      const hydration = by('console', 'error', 'warn', 'uncaught').filter((e) =>
-        /hydrat/i.test(e.summary),
-      )
-      if (hydration.length === 0) return []
-      return [
-        {
-          severity: 'error',
-          title: 'Hydration mismatch between the server render and the client',
-          entries: numbers(hydration),
-          evidence: [clip(hydration.at(-1)!.summary, 400) + where(hydration.at(-1)!)],
-        },
-      ]
+    check: (context) => {
+      const failures = hydrationFailures(context)
+      return failures.length === 0 ? [] : [hydrationFinding(failures)]
     },
   },
   {
     id: 'core/uncaught',
     check: ({ by }) =>
-      groups(by('console', 'uncaught', 'unhandledrejection'), (e) => e.summary)
+      groups(
+        // A hydration failure has its own finding, which says more.
+        by('console', 'uncaught', 'unhandledrejection').filter((e) => !/hydrat/i.test(e.summary)),
+        (e) => e.summary,
+      )
         .slice(0, 5)
         .map(([summary, list]) => {
           // The browser hides everything about an error in a script from
@@ -216,6 +218,7 @@ export const CORE_RULES: ReadonlyArray<Rule> = [
           severity: 'warning',
           title: `${page.brokenImageCount} ${page.brokenImageCount === 1 ? 'image' : 'images'} did not load`,
           evidence: page.brokenImages.slice(0, 5).map((source) => clip(source, 200)),
+          more: page.brokenImages.slice(5).map((source) => clip(source, 200)),
         },
       ]
     },
@@ -230,6 +233,7 @@ export const CORE_RULES: ReadonlyArray<Rule> = [
           severity: 'warning',
           title: `${page.unnamedCount} ${page.unnamedCount === 1 ? 'link or control has' : 'links or controls have'} no accessible name`,
           evidence: page.unnamed.slice(0, 5).map((html) => clip(html, 260)),
+          more: page.unnamed.slice(5).map((html) => clip(html, 260)),
           hint: 'Each is a tab stop a screen reader cannot describe. Give it visible text, an `aria-label`, or an image with `alt`. An empty link often means its content failed to render.',
         },
       ]

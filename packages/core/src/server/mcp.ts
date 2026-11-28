@@ -2,6 +2,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { NAME } from '../protocol.js'
 import { diagnose, isProblem } from './diagnose.js'
+import { partition, pathOf } from './standing.js'
+import type { Finding } from './rules.js'
 import { collect } from './source.js'
 import type { Hub, Session } from './hub.js'
 import type { ServerSource } from './source.js'
@@ -215,7 +217,7 @@ export function createMcpServer(hub: Hub, options: McpOptions = {}): McpServer {
     'diagnose',
     {
       description:
-        "Reads the log and the live page for things that are wrong (build errors, uncaught errors, failed requests, the same request sent twice at once, the slowest calls) and for mistakes the libraries' own documentation names, such as data fetched twice, request waterfalls or settings that defeat themselves. A finding with `fix` and `docs` restates the recommended way from that source: `docs.at` is a URL, or `package: path` of a skill file shipped in node_modules that you can open. Findings of severity info are judgment calls; read their hint.",
+        "Reads the log and the live page for things that are wrong (build errors, uncaught errors, failed requests, the same request sent twice at once, the slowest calls) and for mistakes the libraries' own documentation names, such as data fetched twice, request waterfalls or settings that defeat themselves. A finding with `fix` and `docs` restates the recommended way from that source: `docs.at` is a URL, or `package: path` of a skill file shipped in node_modules that you can open. Findings of severity info are judgment calls; read their hint. A warning that pages at other paths report too is not about this page, and is only named, under `standing`.",
       inputSchema: {
         session,
         after: z
@@ -224,23 +226,57 @@ export function createMcpServer(hub: Hub, options: McpOptions = {}): McpServer {
           .min(0)
           .optional()
           .describe('Only look at entries numbered above this.'),
+        all: z
+          .boolean()
+          .optional()
+          .describe(
+            'List every finding in full. By default a warning that other pages of the app report too is only named, under `standing`.',
+          ),
       },
       annotations: read,
     },
-    ({ session: id, after }) =>
+    ({ session: id, after, all }) =>
       guard(async () => {
         const target = hub.resolve(id)
         const live = target.connected
           ? await hub.call(target, 'page.facts').catch(() => null)
           : null
+        if (live) target.facts = live
         const entries =
           after === undefined
             ? target.entries
             : target.entries.filter((entry) => entry.n > after)
+        const result = diagnose(entries, (live ?? null) as any, target.dropped, parts)
+        const head = { session: target.info.id, lastEntry: lastEntry(target) }
+        // `more` is for comparing pages, not for the agent.
+        const sent = (findings: Array<Finding>) => findings.map(({ more: _more, ...finding }) => finding)
+        if (all) return { ...head, ...result, findings: sent(result.findings) }
+
+        // What pages at other paths report as well is probably not about this one.
+        const here = pathOf(target.info.url)
+        const others = [...hub.sessions.values()]
+          .filter((other) => other !== target && pathOf(other.info.url) !== here)
+          .sort((a, b) => b.connectedAt - a.connectedAt)
+          .slice(0, 5)
+        const { own, standing } = partition(
+          result.findings,
+          others.flatMap(
+            (other) => diagnose(other.entries, (other.facts ?? null) as any, 0, parts).findings,
+          ),
+        )
         return {
-          session: target.info.id,
-          lastEntry: lastEntry(target),
-          ...diagnose(entries, live as any, target.dropped, parts),
+          ...head,
+          ok: result.ok,
+          findings: sent(own),
+          ...(standing.length > 0
+            ? {
+                standing: {
+                  note: `Also reported on ${others.length === 1 ? 'another page' : 'other pages'} of this app, so probably not about this page. Pass \`all: true\` for their evidence.`,
+                  findings: standing,
+                },
+              }
+            : {}),
+          checked: result.checked,
         }
       }),
   )

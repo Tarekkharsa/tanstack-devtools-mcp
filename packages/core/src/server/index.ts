@@ -8,7 +8,15 @@ export { registerOnAgentHost } from './devframe.js'
 export type { AgentHostLike } from './devframe.js'
 export { CORE_RULES, burst, diagnose, groups, isProblem } from './diagnose.js'
 export type { DiagnoseParts } from './diagnose.js'
-export { clip, numbers, ruleContext, runRules, where } from './rules.js'
+export {
+  clip,
+  hydrationFailures,
+  hydrationFinding,
+  numbers,
+  ruleContext,
+  runRules,
+  where,
+} from './rules.js'
 export type {
   Finding,
   KnownMessage,
@@ -40,3 +48,5 @@ export type {
   PageToolInfo,
   SessionInfo,
 } from '../protocol.js'
+export { partition } from './standing.js'
+export type { StandingFinding } from './standing.js'

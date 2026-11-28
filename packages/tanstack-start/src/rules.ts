@@ -1,4 +1,4 @@
-import { clip, numbers, where } from '@loopsight/core/server'
+import { clip, hydrationFailures, hydrationFinding, numbers, where } from '@loopsight/core/server'
 import type { KnownMessage, LogEntry, Reference, Rule } from '@loopsight/core/server'
 
 /**
@@ -29,19 +29,9 @@ export const START_RULES: Array<Rule> = [
     supersedes: ['core/hydration-mismatch'],
     fix: 'Make the first client render match the server. Move a client-only value (dates, locale, `window`) into `useEffect` or state, or gate the component with `<ClientOnly fallback>` or `useHydrated()`. State the server must see belongs in search params, not `location.hash`, which is never sent to the server.',
     docs: EXECUTION,
-    check: ({ by }) => {
-      const hydration = by('console', 'error', 'warn', 'uncaught').filter((entry) =>
-        /hydrat/i.test(entry.summary),
-      )
-      if (hydration.length === 0) return []
-      return [
-        {
-          severity: 'error',
-          title: 'Hydration mismatch between the server render and the client',
-          entries: numbers(hydration),
-          evidence: [clip(hydration.at(-1)!.summary, 400) + where(hydration.at(-1)!)],
-        },
-      ]
+    check: (context) => {
+      const failures = hydrationFailures(context)
+      return failures.length === 0 ? [] : [hydrationFinding(failures)]
     },
   },
   {

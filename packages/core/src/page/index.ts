@@ -21,6 +21,8 @@ import type { Handlers, Recorder } from './types.js'
 export { ago, bounded, brief, diff, drill } from './serialize.js'
 export { appFrames, here, parseStack } from './stack.js'
 export { documentFacts } from './document.js'
+export { hydrationMismatch } from './capture.js'
+export type { Mismatch } from './capture.js'
 export type { DocumentFacts } from './document.js'
 export type { Bounds, Change } from './serialize.js'
 export type {
